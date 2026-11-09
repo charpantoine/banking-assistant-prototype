@@ -181,4 +181,5 @@ UI / EVAL / TESTS
 - Add a UI checkbox "Simulate bank API outage (demo)" that sets the runtime flag (approved addition).
 - Clear conversation = new session_id + clears pending action.
 - Live LLM tests: no retries, tight assertions. If a test is flaky, report it to me; never loosen it silently.
+- Stage 3 adds test 12: "What are your current mortgage rates?" -> FAQ answer says the information is not available and offers an advisor; it contains no rate or percentage.
 - Production line: "The agent logic stays the same; going to production replaces the mocks and the in-memory store, and adds strong authentication, an API gateway and monitoring."

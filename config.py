@@ -19,3 +19,12 @@ TIMEZONE = "Europe/Paris"
 
 DEFAULT_TRANSACTIONS = 5
 MAX_TRANSACTIONS = 50
+
+KNOWLEDGE_DIR = BASE_DIR / "knowledge"
+INDEX_PATH = BASE_DIR / "data" / "index.npz"
+EMBED_MODEL = "mistral-embed"
+EMBED_BATCH_SIZE = 32
+TOP_K = 3
+# Calibrated on 10 queries; weakest on-topic 0.733 vs best uncovered banking 0.720;
+# loose filter by design, precision comes from the grounded FAQ prompt (see test in stage 3).
+RAG_THRESHOLD = 0.70
