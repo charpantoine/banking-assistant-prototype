@@ -1,0 +1,97 @@
+{
+  "customers": {
+    "C001": {"branch_id": "B01"},
+    "C002": {"branch_id": "B02"}
+  },
+  "accounts": [
+    {
+      "id": "ACC-1001",
+      "customer_id": "C001",
+      "label": "Current account",
+      "iban": "FR7699999000010000001234567",
+      "balance": 2450.75,
+      "currency": "EUR",
+      "transactions": [
+        {"date": "2026-11-07", "label": "Grocery store", "amount": -64.32},
+        {"date": "2026-11-05", "label": "Pharmacy", "amount": -18.9},
+        {"date": "2026-11-03", "label": "Restaurant", "amount": -42.5},
+        {"date": "2026-11-02", "label": "Rent", "amount": -850.0},
+        {"date": "2026-10-30", "label": "Salary", "amount": 2780.0},
+        {"date": "2026-10-27", "label": "Electricity bill", "amount": -71.15},
+        {"date": "2026-10-24", "label": "Online shopping", "amount": -129.99}
+      ]
+    },
+    {
+      "id": "ACC-1002",
+      "customer_id": "C001",
+      "label": "Savings account",
+      "iban": "FR7699999000010000009876512",
+      "balance": 12800.0,
+      "currency": "EUR",
+      "transactions": [
+        {"date": "2026-11-01", "label": "Monthly savings transfer", "amount": 200.0},
+        {"date": "2026-10-01", "label": "Monthly savings transfer", "amount": 200.0},
+        {"date": "2026-09-30", "label": "Interest", "amount": 37.4}
+      ]
+    },
+    {
+      "id": "ACC-2001",
+      "customer_id": "C002",
+      "label": "Current account",
+      "iban": "FR7699999000020000005555534",
+      "balance": 987.65,
+      "currency": "EUR",
+      "transactions": [
+        {"date": "2026-11-06", "label": "Bookshop", "amount": -23.8}
+      ]
+    }
+  ],
+  "cards": [
+    {"id": "CARD-1001", "customer_id": "C001", "type": "Debit card", "last_4": "4821", "status": "active"},
+    {"id": "CARD-1002", "customer_id": "C001", "type": "Credit card", "last_4": "7350", "status": "active"},
+    {"id": "CARD-2001", "customer_id": "C002", "type": "Debit card", "last_4": "9106", "status": "active"}
+  ],
+  "branches": {
+    "B01": {
+      "name": "Riverside Branch",
+      "address": "12 Example Quay, 75000 Paris",
+      "weekly_hours": {
+        "monday": "Closed",
+        "tuesday": "09:00-17:30",
+        "wednesday": "09:00-17:30",
+        "thursday": "09:00-17:30",
+        "friday": "09:00-17:30",
+        "saturday": "09:00-12:30",
+        "sunday": "Closed"
+      }
+    },
+    "B02": {
+      "name": "Hilltop Branch",
+      "address": "48 Sample Avenue, 69000 Lyon",
+      "weekly_hours": {
+        "monday": "10:00-18:00",
+        "tuesday": "10:00-18:00",
+        "wednesday": "10:00-18:00",
+        "thursday": "10:00-18:00",
+        "friday": "10:00-18:00",
+        "saturday": "Closed",
+        "sunday": "Closed"
+      }
+    }
+  },
+  "public_holidays": [
+    {"date": "2026-11-11", "name": "Armistice Day"},
+    {"date": "2026-12-25", "name": "Christmas Day"},
+    {"date": "2027-01-01", "name": "New Year's Day"},
+    {"date": "2027-03-29", "name": "Easter Monday"},
+    {"date": "2027-05-01", "name": "Labour Day"},
+    {"date": "2027-05-06", "name": "Ascension Day"},
+    {"date": "2027-05-08", "name": "Victory Day"},
+    {"date": "2027-05-17", "name": "Whit Monday"},
+    {"date": "2027-07-14", "name": "Bastille Day"},
+    {"date": "2027-08-15", "name": "Assumption Day"},
+    {"date": "2027-11-01", "name": "All Saints' Day"},
+    {"date": "2027-11-11", "name": "Armistice Day"},
+    {"date": "2027-12-25", "name": "Christmas Day"}
+  ]
+}

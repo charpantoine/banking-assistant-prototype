@@ -114,3 +114,71 @@ guardrails.py + router + FAQ and account agents + tests 1-3, 6-11.
 Action agent + confirm / cancel + tests 4-5.
 app.py (Gradio, theme) + test_app.py.
 eval.py + golden set + README.
+
+# Decisions v1.1
+
+STAGE 1: defaults accepted, all of them (in-memory state reset on restart, config.py + conftest.py + pytest.ini, masking added inside log_event in stage 3, one audit test, idempotency/lock_card/other-function defaults, per-service outage messages, IBAN masked by the function, holiday list, English mock labels, pinned requirements, max 5 lines per function, one-line docstrings in tests).
+
+BUILD
+- Tests are numbered 1-11 in the listed order. Stage 3 also builds out_of_scope and handoff. Test 11 is extended in stage 4.
+- In stage 3, the action route returns a fixed "not available yet" message.
+- 600 lines is indicative (tests, data, docs, prompts excluded). Clarity first.
+- load_dotenv() is called once in config.py; app.py and eval.py import config.
+
+LANGUAGE
+- detect_lang(text) in code: simple FR/EN heuristic; anything else -> English. Stored in the session.
+- All fixed messages (refusals, fallback, tool errors, handoff intro, confirm/cancel, out_of_scope) are FR/EN templates in config.py, picked by detect_lang. Confirm/cancel use the language of the last user message.
+- Test 9 uses its own French word list, not detect_lang.
+
+GUARDRAILS
+- Injection rules: "ignore previous instructions", "ignore your instructions", "system prompt", "you are now", French variants ("ignore tes instructions", "oublie tes instructions", "ignore les instructions"), and any C\d{3} id that is not CUSTOMER_ID.
+- "My wife's balance" (no id): the account agent prompt refuses other people's data; architecture guarantees it anyway since customer_id is injected by code.
+- Moderation: block only on categories listed in config (sexual, hate_and_discrimination, violence_and_threats, dangerous_and_criminal_content, selfharm). Other categories (financial, pii, law, health...) are logged, never blocking, otherwise every banking question gets flagged.
+- Moderation API failure: fail closed (fixed "temporarily unavailable" message), logged.
+- Injection check on user input only; retrieved docs and tool results are trusted internal content (production point for the README).
+- Raw messages go to Mistral: intended (production = models deployed in the bank's environment). Masking is for the audit log. result_summary may contain amounts.
+- Flagged messages are not added to history (audit only).
+
+ROUTER
+- Router receives the last 6 messages of history.
+- Precedence: "how do I file a complaint / contact an advisor" -> faq; explicit request for a human -> handoff; "my card was stolen, block it" -> action (answer also points to the opposition procedure).
+- Lock = temporary, reversible lock (the only allowlisted action). Opposition = permanent, for lost/stolen cards, explained in FAQ docs only.
+- Invalid JSON or unknown route: one retry, then a fixed "please rephrase or ask for an advisor" message.
+- Non-allowlisted actions (transfer, unlock...): action agent says it cannot do it here and offers the FAQ procedure or an advisor; code enforces the allowlist anyway.
+- out_of_scope refusal = fixed template.
+
+FAQ / RAG
+- Documents in English; answers in the user's language; "Source: <title>" forced in both languages.
+- Search query = last 2 user messages concatenated (no query rewriting).
+- Threshold: calibrate in stage 2 by printing scores for 5 on-topic and 5 off-topic queries; show me before fixing it.
+- Front-matter: title only (drop audience and last_updated).
+- Text before the first ## goes into the first chunk.
+- Cache hash covers documents + embedding model name.
+- Not-found counter resets on any found answer or any other route; on the 2nd consecutive miss: handoff only.
+
+ACCOUNT AGENT
+- Every amount in the answer must exist in a tool result. No totals across accounts. Test normalises number formats.
+- Any tool error -> code returns the fixed error template naming the service; the model is not called again.
+- Max 5 iterations for all agents; beyond -> fixed "could not complete, an advisor can help" message.
+
+ACTIONS
+- propose_lock_card checks ownership and status in code; already locked -> answer says so, no pending action.
+- Pending action stays while the user types; replaced only by a new proposal; cleared by confirm, cancel or Clear conversation. Typing "yes" never executes: reply "please use the Confirm button".
+- On service_unavailable at confirm: keep the pending action (retry with the same key).
+- Second confirm returns "No pending action."
+- reason goes to the audit log only.
+- The session is authoritative; handle_turn's return value is for the UI.
+
+SESSION / AUDIT / TRACE
+- Session dict: session_id (uuid), history, pending_action, not_found_count, lang. Last 20 messages sent to models.
+- Handoff does not end the conversation; summary max 3 lines.
+- Audit written step by step, including early exits and confirm/cancel.
+- Trace steps get a "sources" field. Use latency_ms in both trace and audit.
+- Timezone: Europe/Paris.
+
+UI / EVAL / TESTS
+- eval.py runs the real pipeline up to routing; expected values include a 6th one: "blocked".
+- Add a UI checkbox "Simulate bank API outage (demo)" that sets the runtime flag (approved addition).
+- Clear conversation = new session_id + clears pending action.
+- Live LLM tests: no retries, tight assertions. If a test is flaky, report it to me; never loosen it silently.
+- Production line: "The agent logic stays the same; going to production replaces the mocks and the in-memory store, and adds strong authentication, an API gateway and monitoring."
