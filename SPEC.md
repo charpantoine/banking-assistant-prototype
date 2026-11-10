@@ -242,3 +242,16 @@ UI
 - Trace panel: Markdown sections (route and reason, guardrails, model and tool calls with masked args and latency, sources, total time) plus a closed "Raw trace (JSON)" accordion.
 - Clear conversation keeps the current mode.
 
+
+# Decisions v1.3 (UI polish, no logic change)
+
+Where a v1.1 or v1.2 UI line conflicts, v1.3 wins.
+
+- No "Logged in" banner. The mode toggle stays, labelled "Session:", in the Demo controls block.
+- "Customer questions" row: the 4 original customer examples plus "Quel est le solde de mes comptes ?". Clear conversation stays with the chat.
+- "Demo controls" accordion in the right column, below Raw trace and Audit log, closed by default: the Session toggle, the outage checkbox and the injection example. Its label shows the state even when closed ("Demo controls · Session: logged in" / "· Session: visitor", plus "· Outage ON") and is refreshed on every mode or outage change.
+- Right panel hint when empty (page load, Clear, Session switch): "Ask a question to see the route, guardrails, tool calls and sources."
+- Gradio footer hidden (CSS). Font: Inter from Google Fonts, system sans-serif fallback.
+
+ACTIONS (v1.3)
+- Code step before the action agent (_named_card_reply): it applies when the latest message has a lock word (LOCK_WORDS: lock, block, freeze, bloquer, verrouiller...; whole words, so "unlock" and "débloquer" do not match) or replies to the fixed "which card?" / "can't find" message, has no negation (NEGATION_WORDS: don't, not, never, pas, jamais) and names a card. Unknown digits -> "can't find"; exactly one named card (all identifiers agreeing): locked -> "already locked", active -> proposal (Confirm still required). Any other case goes to the model. refuse_action never overrides a card the customer named in a lock request.

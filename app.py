@@ -18,18 +18,17 @@ FORCE_LIGHT_JS = """() => {
 }"""
 
 CSS = f"""
-.banner {{border-radius: 8px; padding: 6px 12px; border-left: 4px solid;}}
-.banner.customer {{background: {config.COLOR_LIGHT}; border-color: {config.COLOR_PRIMARY};}}
-.banner.visitor {{background: {config.COLOR_VISITOR_BG}; border-color: {config.COLOR_VISITOR_BORDER};}}
-.banner, .banner * {{color: {config.COLOR_TEXT} !important;}}
+footer {{display: none !important;}}
 .pending-card {{border: 2px solid {config.COLOR_PRIMARY} !important; border-radius: 12px !important;
                 background: {config.COLOR_CARD} !important;}}
 """
 
 
 def make_theme():
-    """Soft theme with the green accent, light green background, white cards, dark grey text, rounded corners."""
-    return gr.themes.Soft(primary_hue="green", radius_size="lg").set(
+    """Soft theme with the green accent, light green background, white cards, dark grey text, rounded corners,
+    Inter font from Google Fonts (system sans-serif if it cannot be loaded)."""
+    font = (gr.themes.GoogleFont(config.FONT), "ui-sans-serif", "system-ui", "sans-serif")
+    return gr.themes.Soft(primary_hue="green", radius_size="lg", font=font).set(
         body_background_fill=config.COLOR_LIGHT, body_text_color=config.COLOR_TEXT,
         block_background_fill=config.COLOR_CARD, color_accent=config.COLOR_PRIMARY,
         button_primary_background_fill=config.COLOR_PRIMARY, button_primary_background_fill_hover=config.COLOR_DARK,
@@ -47,12 +46,6 @@ def new_state(authenticated=True):
     in the session's default language (English)."""
     session = agents.new_session(authenticated)
     return {"session": session, "chat": welcome_chat(session["lang"], authenticated)}
-
-
-def banner_html(authenticated):
-    """Mode banner: green "Logged in as demo customer" or grey "Visitor (not logged in)"."""
-    css_class, text = ("customer", config.MODE_CUSTOMER) if authenticated else ("visitor", config.MODE_VISITOR)
-    return f'<div class="banner {css_class}">{text}</div>'
 
 
 def audit_rows():
@@ -149,23 +142,37 @@ def handle_cancel(state):
 
 
 def handle_clear(mode):
-    """Clear conversation: new session_id in the current mode, welcome message, no pending action, empty panel."""
+    """Clear conversation: new session_id in the current mode, welcome message, no pending action, panel hint."""
     state = new_state(mode == config.MODE_CUSTOMER)
-    return state["chat"], "", state, "", None, *pending_card(None), audit_rows()
+    return state["chat"], "", state, config.PANEL_EMPTY, None, *pending_card(None), audit_rows()
 
 
 def handle_mode(mode, state):
-    """Mode toggle: any switch starts a new session (audited with both ids) with the new mode's welcome message;
-    the trace panel is emptied, the Confirm card hidden and the banner updated."""
+    """Session toggle: any switch starts a new session (audited with both ids) with the new mode's welcome message;
+    the trace panel shows its hint and the Confirm card is hidden."""
     authenticated = mode == config.MODE_CUSTOMER
     session = agents.switch_mode(state["session"], authenticated)
     state = {"session": session, "chat": welcome_chat(session["lang"], authenticated)}
-    return state["chat"], state, banner_html(authenticated), "", None, *pending_card(None), audit_rows()
+    return state["chat"], state, config.PANEL_EMPTY, None, *pending_card(None), audit_rows()
 
 
 def set_outage(enabled):
     """Demo switch: every mocked bank API answers service_unavailable while on (whole app, not per user)."""
     config.SIMULATE_OUTAGE = bool(enabled)
+
+
+def demo_label(mode, outage):
+    """Demo controls accordion label showing the current state, visible even when closed,
+    e.g. "Demo controls · Session: visitor · Outage ON"."""
+    parts = [config.DEMO_CONTROLS_TITLE, f"{config.SESSION_LABEL} {config.SESSION_STATES[mode]}"]
+    if outage:
+        parts.append(config.OUTAGE_ON)
+    return " · ".join(parts)
+
+
+def update_demo_label(mode, outage):
+    """Refresh the Demo controls accordion label after a mode or outage change."""
+    return gr.update(label=demo_label(mode, outage))
 
 
 def build_app():
@@ -174,10 +181,6 @@ def build_app():
         state = gr.State(new_state)
         question = gr.State("")  # the question, handed from step 1 to step 2 after the box is cleared
         gr.Markdown(f"# {config.APP_TITLE}\n{config.APP_SUBTITLE}")
-        with gr.Row():
-            banner = gr.HTML(banner_html(True))
-            mode = gr.Radio([config.MODE_CUSTOMER, config.MODE_VISITOR], value=config.MODE_CUSTOMER,
-                            show_label=False)
         with gr.Row():
             with gr.Column(scale=3):
                 # one bubble per message: the Confirm/Cancel result stays separate from the proposal
@@ -191,18 +194,22 @@ def build_app():
                 with gr.Row():
                     box = gr.Textbox(placeholder="Ask a question…", show_label=False, scale=5)
                     send = gr.Button("Send", variant="primary", scale=1)
+                gr.Markdown(f"**{config.CUSTOMER_QUESTIONS_TITLE}**")
                 with gr.Row():
-                    examples = [gr.Button(q, size="sm") for q in config.EXAMPLE_QUESTIONS]
-                with gr.Row():
-                    outage = gr.Checkbox(value=config.SIMULATE_OUTAGE, label=config.OUTAGE_LABEL)
-                    clear = gr.Button(config.CLEAR_LABEL)
+                    examples = [gr.Button(q, size="sm") for q in config.CUSTOMER_EXAMPLES]
+                clear = gr.Button(config.CLEAR_LABEL, size="sm")
             with gr.Column(scale=2):
                 gr.Markdown(f"### {config.PANEL_TITLE}")
-                panel = gr.Markdown()
+                panel = gr.Markdown(config.PANEL_EMPTY)
                 with gr.Accordion(config.RAW_TRACE_TITLE, open=False):
                     raw_trace = gr.JSON()
                 with gr.Accordion(config.AUDIT_TITLE, open=False):
                     audit_table = gr.Dataframe(headers=AUDIT_COLUMNS, interactive=False, wrap=True)
+                with gr.Accordion(demo_label(config.MODE_CUSTOMER, config.SIMULATE_OUTAGE), open=False) as demo_box:
+                    mode = gr.Radio([config.MODE_CUSTOMER, config.MODE_VISITOR], value=config.MODE_CUSTOMER,
+                                    label=config.SESSION_LABEL)
+                    outage = gr.Checkbox(value=config.SIMULATE_OUTAGE, label=config.OUTAGE_LABEL)
+                    examples.append(gr.Button(config.INJECTION_EXAMPLE, size="sm"))
         outputs = [chatbot, state, panel, raw_trace, card, card_text, audit_table]
         busy_buttons = [send, *examples]
         triggers = [(send.click, box), (box.submit, box)] + [(example.click, example) for example in examples]
@@ -213,8 +220,10 @@ def build_app():
         confirm.click(handle_confirm, [state], outputs)
         cancel.click(handle_cancel, [state], outputs)
         clear.click(handle_clear, [mode], [chatbot, box, *outputs[1:]])
-        mode.change(handle_mode, [mode, state], [chatbot, state, banner, panel, raw_trace, card, card_text, audit_table])
+        mode.change(handle_mode, [mode, state], [chatbot, state, panel, raw_trace, card, card_text, audit_table])
         outage.change(set_outage, [outage], None)
+        for control in (mode, outage):
+            control.change(update_demo_label, [mode, outage], demo_box, queue=False)
     return demo
 
 

@@ -360,9 +360,45 @@ def _action_call(name, args, session):
     return {"refused": str(args.get("requested_action", name))}, _msg("action_refused", session["lang"])
 
 
+def _answers_which_card(session):
+    """True if the previous assistant message was the fixed "which card?" or "can't find" question."""
+    previous = session["history"][-2]["content"] if len(session["history"]) > 1 else ""
+    return any(previous.startswith(config.MESSAGES[key][lang].split("{")[0])
+               for key in ("which_card", "card_not_found_digits") for lang in ("en", "fr"))
+
+
+def _named_card_reply(session, trace):
+    """Code step before the action agent, for a lock request (lock word, or a reply to "which card?") with no
+    negation that names a card: unknown digits -> "can't find"; exactly one named card -> "already locked" or its
+    proposal (Confirm still needed). None (unclear case) leaves it to the model."""
+    text, lang = session["history"][-1]["content"], session["lang"]
+    words = set(re.findall(r"[^\W\d_]+(?:'[^\W\d_]+)?", text.lower().replace("’", "'")))
+    is_lock_request = words & config.LOCK_WORDS or _answers_which_card(session)
+    if words & config.NEGATION_WORDS or not is_lock_request or _card_identifiers(text) == (set(), set()):
+        return None
+    cards, ms = _timed(_run_tool, "list_cards", {}, _customer_id(session))
+    if "error" in cards:
+        reply, outcome = _tool_error("list_cards", cards, lang), cards["error"]
+    else:
+        active = [c for c in cards["cards"] if c["status"] == "active"]
+        unknown, named = _unknown_digits(text, cards["cards"]), _named_cards(text, cards["cards"])
+        if unknown:
+            reply, outcome = _card_not_found(unknown, active, lang), "card_not_found"
+        elif len(named) != 1:
+            reply, outcome = None, "unclear: left to the model"
+        elif named[0]["status"] != "active":
+            reply, outcome = _msg("card_already_locked", lang, card=_card_in(lang, _label(named[0]))), "already_locked"
+        else:
+            reply, outcome = _store_proposal(named[0], session, "lock_proposed")[1], "lock_proposed"
+    _step(session, trace, "card_check", "action", "named_card (code)", {"text": text}, outcome, ms)
+    return reply
+
+
 def action_agent(session, trace):
-    """Action agent: can only propose a card lock (confirmed later by the button) or refuse."""
-    return _tool_loop(session, trace, "action", ACTION_PROMPT, ACTION_TOOLS, _action_call)
+    """Action agent: a lock request naming a card is answered in code first; otherwise the model can only
+    propose a card lock (confirmed later by the button) or refuse."""
+    return _named_card_reply(session, trace) or _tool_loop(session, trace, "action", ACTION_PROMPT, ACTION_TOOLS,
+                                                           _action_call)
 
 
 def handoff_agent(session, trace):

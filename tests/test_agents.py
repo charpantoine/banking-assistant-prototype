@@ -443,6 +443,37 @@ def test_digits_of_locked_card_say_already_locked():
     assert "already locked" in answer, answer
 
 
+def test_named_card_answered_in_code_without_agent_model():
+    """A lock request naming a card is decided by the code step: no action model call, no refuse_action."""
+    answer, trace, pending = agents.handle_turn("Lock my debit card", agents.new_session())
+    assert pending["card_id"] == "CARD-1001"
+    assert any(s["step"] == "card_check" and s["result_summary"] == "lock_proposed" for s in trace)
+    assert not any(s["agent"] == "action" and s["step"] == "model_call" for s in trace)
+
+
+def test_unlock_my_debit_card_gets_no_lock_proposal():
+    """"unlock" is not a lock word: no code proposal, the model refuses, no pending action."""
+    answer, trace, pending = agents.handle_turn("unlock my debit card", agents.new_session())
+    assert pending is None, answer
+    assert not any(s["step"] == "card_check" for s in trace)
+
+
+def test_dont_lock_my_debit_card_gets_no_lock_proposal():
+    """A negation skips the code step; no pending action."""
+    answer, trace, pending = agents.handle_turn("don't lock my debit card", agents.new_session())
+    assert pending is None, answer
+    assert not any(s["step"] == "card_check" for s in trace)
+
+
+def test_the_credit_one_after_which_card_proposes_credit():
+    """"lock my card" gets "which card?"; "the credit one" is a reply to it: the code proposes the credit card."""
+    session = agents.new_session()
+    agents.handle_turn("lock my card", session)
+    answer, trace, pending = agents.handle_turn("the credit one", session)
+    assert pending is not None and pending["card_id"] == "CARD-1002", answer
+    assert any(s["step"] == "card_check" and s["result_summary"] == "lock_proposed" for s in trace)
+
+
 def test_one_active_card_lock_my_card_proposes_it():
     """With one active card, "lock my card" proposes it directly (confirmation still required)."""
     bank_api.lock_card(config.CUSTOMER_ID, "CARD-1002", "key-1")

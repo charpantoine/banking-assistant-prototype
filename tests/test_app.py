@@ -65,7 +65,7 @@ def test_clear_starts_new_session_without_pending_action():
     state = app.new_state()
     state["session"]["pending_action"] = {"action": "lock_card"}
     chat, box, cleared, panel, raw, card, _, _ = app.handle_clear(config.MODE_CUSTOMER)
-    assert chat == app.welcome_chat("en") and box == "" and panel == "" and raw is None
+    assert chat == app.welcome_chat("en") and box == "" and panel == config.PANEL_EMPTY and raw is None
     assert cleared["session"]["session_id"] != state["session"]["session_id"]
     assert cleared["session"]["pending_action"] is None
     assert card["visible"] is False
@@ -91,12 +91,57 @@ def contrast(foreground, background):
     return (high + 0.05) / (low + 0.05)
 
 
-def test_light_mode_forced_and_banner_readable():
-    """The page forces light mode; the banner text is dark grey on light green or light grey (WCAG AA contrast)."""
+def test_light_mode_forced_footer_hidden_and_text_readable():
+    """The page forces light mode and hides the Gradio footer; dark grey text on light green or white
+    passes WCAG AA contrast."""
     assert '"__theme", "light"' in app.FORCE_LIGHT_JS
-    assert f".banner, .banner * {{color: {config.COLOR_TEXT} !important;}}" in app.CSS
+    assert "footer {display: none !important;}" in app.CSS
     assert contrast(config.COLOR_TEXT, config.COLOR_LIGHT) >= 4.5
-    assert contrast(config.COLOR_TEXT, config.COLOR_VISITOR_BG) >= 4.5
+    assert contrast(config.COLOR_TEXT, config.COLOR_CARD) >= 4.5
+
+
+def test_layout_splits_customer_questions_and_demo_controls():
+    """No banner; 5 customer examples (one French) apart from the injection example; Session toggle labelled;
+    the trace panel starts with its hint; the theme uses Inter."""
+    import gradio as gr
+    blocks = list(app.build_app().blocks.values())
+    assert not any(isinstance(b, gr.HTML) for b in blocks)
+    assert [b.value for b in blocks if isinstance(b, gr.Button) and b.value in config.EXAMPLE_QUESTIONS] == \
+        config.CUSTOMER_EXAMPLES + [config.INJECTION_EXAMPLE]
+    assert "Quel est le solde de mes comptes ?" in config.CUSTOMER_EXAMPLES
+    assert config.INJECTION_EXAMPLE not in config.CUSTOMER_EXAMPLES
+    assert next(b for b in blocks if isinstance(b, gr.Radio)).label == config.SESSION_LABEL == "Session:"
+    assert any(isinstance(b, gr.Markdown) and b.value == config.PANEL_EMPTY for b in blocks)
+    assert app.make_theme().font.startswith("'Inter'")
+
+
+def in_block(component, block):
+    """True if the component is inside the block, at any depth."""
+    parent = component.parent
+    while parent is not None and parent is not block:
+        parent = parent.parent
+    return parent is block
+
+
+def test_demo_controls_accordion_closed_in_right_column_with_state_label(monkeypatch):
+    """Demo controls: last accordion of the right column (after Raw trace and Audit log), closed, holding the
+    Session toggle, outage checkbox and injection example; customer questions and Clear stay under the chat;
+    the label shows session and outage state and is refreshed on change."""
+    import gradio as gr
+    monkeypatch.setattr(config, "SIMULATE_OUTAGE", False)
+    blocks = list(app.build_app().blocks.values())
+    demo = next(b for b in blocks if isinstance(b, gr.Accordion) and b.label.startswith(config.DEMO_CONTROLS_TITLE))
+    accordions = [c.label for c in demo.parent.children if isinstance(c, gr.Accordion)]
+    assert accordions == [config.RAW_TRACE_TITLE, config.AUDIT_TITLE, "Demo controls · Session: logged in"]
+    assert demo.open is False
+    inside = [b for b in blocks if isinstance(b, (gr.Radio, gr.Checkbox)) or
+              (isinstance(b, gr.Button) and b.value == config.INJECTION_EXAMPLE)]
+    assert len(inside) == 3 and all(in_block(b, demo) for b in inside)
+    outside = [b for b in blocks if isinstance(b, gr.Button) and b.value in config.CUSTOMER_EXAMPLES + [config.CLEAR_LABEL]]
+    assert len(outside) == 6 and not any(in_block(b, demo.parent) for b in outside)
+    assert app.demo_label(config.MODE_VISITOR, False) == "Demo controls · Session: visitor"
+    assert app.demo_label(config.MODE_CUSTOMER, True) == "Demo controls · Session: logged in · Outage ON"
+    assert app.update_demo_label(config.MODE_VISITOR, True)["label"] == "Demo controls · Session: visitor · Outage ON"
 
 
 def test_chatbot_keeps_consecutive_messages_separate():
@@ -119,23 +164,22 @@ def test_welcome_message_on_new_session_and_after_clear():
 
 
 def test_switching_to_visitor_starts_new_session():
-    """Switching to visitor starts a new session: new id, no pending action, hidden card, grey banner, empty panel,
+    """Switching to visitor starts a new session: new id, no pending action, hidden card, panel hint,
     visitor welcome; the audit records both session ids; switching back does the same (no API call)."""
     state = app.new_state()
     old_id = state["session"]["session_id"]
     state["session"]["pending_action"] = {"action": "lock_card", "card_id": "CARD-1001",
                                           "card_label": "Debit card ****4821", "idempotency_key": "key-1"}
-    chat, state, banner, panel, raw, card, card_text, rows = app.handle_mode(config.MODE_VISITOR, state)
+    chat, state, panel, raw, card, card_text, rows = app.handle_mode(config.MODE_VISITOR, state)
     session = state["session"]
     assert session["session_id"] != old_id and session["authenticated"] is False
     assert session["pending_action"] is None and session["history"] == []
-    assert card["visible"] is False and card_text == "" and panel == "" and raw is None
-    assert 'class="banner visitor"' in banner and config.MODE_VISITOR in banner
+    assert card["visible"] is False and card_text == "" and panel == config.PANEL_EMPTY and raw is None
     assert chat == state["chat"] == app.welcome_chat("en", authenticated=False)
     assert rows[0][1] == "mode_switch" and old_id in rows[0][4] and session["session_id"] in rows[0][4]
-    chat, back, banner, *_ = app.handle_mode(config.MODE_CUSTOMER, state)
+    chat, back, panel, *_ = app.handle_mode(config.MODE_CUSTOMER, state)
     assert back["session"]["session_id"] != session["session_id"] and back["session"]["authenticated"] is True
-    assert 'class="banner customer"' in banner and chat == app.welcome_chat("en")
+    assert chat == app.welcome_chat("en") and panel == config.PANEL_EMPTY
 
 
 def shows_balance(messages):
