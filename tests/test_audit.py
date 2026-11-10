@@ -15,3 +15,12 @@ def test_log_then_read_newest_first(monkeypatch, tmp_path):
     assert events[0]["result_summary"] == "faq"
     assert events[0]["latency_ms"] == 30.0
     assert len(audit.last_events(10)) == 2
+
+
+def test_log_event_masks_pii(monkeypatch, tmp_path):
+    """An IBAN in the arguments and an email in the summary are stored masked."""
+    monkeypatch.setattr(config, "AUDIT_DB_PATH", tmp_path / "audit.db")
+    audit.log_event("s1", "input", "user", "message", {"text": "FR7630006000011234567890189"}, "to a@b.fr", 1.0)
+    event = audit.last_events(1)[0]
+    assert event["args_masked"] == '{"text": "[IBAN]"}'
+    assert event["result_summary"] == "to [EMAIL]"

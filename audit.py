@@ -4,6 +4,7 @@ import sqlite3
 from datetime import datetime, timezone
 
 import config
+from guardrails import mask_pii
 
 _SCHEMA = """CREATE TABLE IF NOT EXISTS events (
     ts TEXT, session_id TEXT, step TEXT, agent TEXT, name TEXT,
@@ -19,10 +20,10 @@ def _connect():
 
 
 def log_event(session_id, step, agent, name, args, result_summary, latency_ms):
-    """Append one event with a UTC ISO 8601 timestamp (mask_pii is added here in stage 3)."""
+    """Append one event with a UTC ISO 8601 timestamp; arguments and summary are PII-masked first."""
     ts = datetime.now(timezone.utc).isoformat()
-    row = (ts, session_id, step, agent, name, json.dumps(args, ensure_ascii=False, default=str),
-           str(result_summary), latency_ms)
+    row = (ts, session_id, step, agent, name, mask_pii(json.dumps(args, ensure_ascii=False, default=str)),
+           mask_pii(str(result_summary)), latency_ms)
     conn = _connect()
     with conn:
         conn.execute("INSERT INTO events VALUES (?, ?, ?, ?, ?, ?, ?, ?)", row)

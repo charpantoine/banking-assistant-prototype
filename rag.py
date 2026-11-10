@@ -1,10 +1,8 @@
 """FAQ retrieval: section chunks, mistral-embed vectors cached on disk, cosine similarity with numpy."""
 import hashlib
-import os
 import re
 
 import numpy as np
-from mistralai.client import Mistral
 
 import config
 
@@ -29,10 +27,7 @@ def _load_chunks():
 
 def _embed(texts):
     """Embed texts in batches and return unit-length vectors, so a dot product is a cosine."""
-    key = os.environ.get("MISTRAL_API_KEY")
-    if not key:
-        raise RuntimeError("MISTRAL_API_KEY missing")
-    client = Mistral(api_key=key)
+    client = config.mistral_client()
     vectors = []
     for start in range(0, len(texts), config.EMBED_BATCH_SIZE):
         batch = texts[start:start + config.EMBED_BATCH_SIZE]
