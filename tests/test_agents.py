@@ -375,3 +375,99 @@ def test_handoff_prompt_names_customer_status(monkeypatch, authenticated, status
     agents.handoff_agent(agents.new_session(authenticated), [])
     assert f"({status})" in prompts[0]
     assert ("logged-in customer" in prompts[0]) is authenticated
+
+
+DEBIT, CREDIT = "Debit card ****4821", "Credit card ****7350"
+
+
+def test_lock_my_card_with_two_active_cards_asks_which():
+    """"lock my card" with 2 active cards: no pending action, both cards listed."""
+    session = agents.new_session()
+    answer, _, pending = agents.handle_turn("lock my card", session)
+    assert pending is None and session["pending_action"] is None
+    assert "4821" in answer and "7350" in answer, answer
+
+
+def test_not_that_card_clears_debit_proposal():
+    """A debit proposal then "not that card": the debit proposal is cleared ("pending_cleared"), the only other
+    active card is proposed instead, and the debit card is never locked."""
+    session = agents.new_session()
+    agents.handle_turn("Lock my debit card", session)
+    assert session["pending_action"]["card_id"] == "CARD-1001"
+    answer, trace, pending = agents.handle_turn("not that card", session)
+    assert any(s["step"] == "pending_cleared" for s in trace)
+    assert pending is None or pending["card_id"] != "CARD-1001"
+    assert answer == config.MESSAGES["propose_other_card"]["en"].format(card=CREDIT)
+    agents.confirm_action(session)
+    assert card_status("CARD-1001") == "active"
+
+
+def test_credit_then_actually_debit_proposes_debit_only():
+    """"lock my credit card" then "actually the debit one": only the debit card is pending; nothing is locked."""
+    session = agents.new_session()
+    agents.handle_turn("lock my credit card", session)
+    assert session["pending_action"]["card_id"] == "CARD-1002"
+    answer, _, pending = agents.handle_turn("actually the debit one", session)
+    assert pending["card_id"] == "CARD-1001"
+    assert answer == config.MESSAGES["lock_proposed"]["en"].format(card=DEBIT)
+    assert card_status("CARD-1001") == card_status("CARD-1002") == "active"
+
+
+def test_propose_rejects_card_not_named_in_message():
+    """Code check: if the model proposes a card the message did not name, no pending action (no API call)."""
+    session = agents.new_session()
+    session["history"].append({"role": "user", "content": "lock my card"})
+    result, answer = agents._propose_lock_card("CARD-1001", session)
+    assert result["error"] == "card_not_named" and session["pending_action"] is None
+    assert answer == config.MESSAGES["which_card"]["en"].format(cards=f"- {DEBIT}\n- {CREDIT}")
+
+
+def test_type_with_wrong_digits_gives_no_pending_action():
+    """"lock Debit card ****7232": no card ends with 7232, so no pending action and a message naming 7232."""
+    answer, _, pending = agents.handle_turn("lock Debit card ****7232", agents.new_session())
+    assert pending is None
+    assert "7232" in answer, answer
+
+
+def test_type_with_right_digits_proposes_that_card():
+    """"lock Debit card ****4821": type and digits agree, that card is proposed."""
+    _, _, pending = agents.handle_turn("lock Debit card ****4821", agents.new_session())
+    assert pending["card_id"] == "CARD-1001"
+
+
+def test_digits_of_locked_card_say_already_locked():
+    """Digits of a locked card: "already locked", no pending action."""
+    bank_api.lock_card(config.CUSTOMER_ID, "CARD-1002", "key-1")
+    answer, _, pending = agents.handle_turn("lock my card ending 7350", agents.new_session())
+    assert pending is None
+    assert "already locked" in answer, answer
+
+
+def test_one_active_card_lock_my_card_proposes_it():
+    """With one active card, "lock my card" proposes it directly (confirmation still required)."""
+    bank_api.lock_card(config.CUSTOMER_ID, "CARD-1002", "key-1")
+    answer, _, pending = agents.handle_turn("lock my card", agents.new_session())
+    assert pending["card_id"] == "CARD-1001"
+    assert answer == config.MESSAGES["lock_proposed"]["en"].format(card=DEBIT)
+    assert card_status("CARD-1001") == "active"
+
+
+@pytest.mark.parametrize("message, card_id, expected", [
+    ("lock Debit card ****7232", "CARD-1001", "card_not_found_digits"),
+    ("lock Credit card ****4821", "CARD-1001", "card_not_found_digits"),
+    ("lock Debit card ****4821", "CARD-1001", "lock_proposed"),
+    ("lock card 4821", "CARD-1001", "lock_proposed"),
+])
+def test_propose_lock_card_identifiers_must_agree(message, card_id, expected):
+    """Code check (no API): unknown digits or a type that contradicts the digits never propose a card."""
+    session = agents.new_session()
+    session["history"].append({"role": "user", "content": message})
+    _, answer = agents._propose_lock_card(card_id, session)
+    cards = f"- {DEBIT}\n- {CREDIT}"
+    if expected == "card_not_found_digits":
+        digits = re.search(r"\d{4}", message).group()
+        assert answer == config.MESSAGES[expected]["en"].format(digits=digits, cards=cards)
+        assert session["pending_action"] is None
+    else:
+        assert answer == config.MESSAGES[expected]["en"].format(card=DEBIT)
+        assert session["pending_action"]["card_id"] == "CARD-1001"

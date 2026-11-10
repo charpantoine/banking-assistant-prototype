@@ -121,12 +121,12 @@ STAGE 1: defaults accepted, all of them (in-memory state reset on restart, confi
 
 BUILD
 - Tests are numbered 1-11 in the listed order. Stage 3 also builds out_of_scope and handoff. Test 11 is extended in stage 4.
-- In stage 3, the action route returns a fixed "not available yet" message.
+- In stage 3, the action route returns a fixed "not available yet" message. (superseded in stage 4: action agent)
 - 600 lines is indicative (tests, data, docs, prompts excluded). Clarity first.
 - load_dotenv() is called once in config.py; app.py and eval.py import config.
 
 LANGUAGE
-- detect_lang(text) in code: simple FR/EN heuristic; anything else -> English. Stored in the session.
+- detect_lang(text) in code: simple FR/EN heuristic; anything else -> English. Stored in the session. (superseded for short messages, see v1.2 sticky language)
 - All fixed messages (refusals, fallback, tool errors, handoff intro, confirm/cancel, out_of_scope) are FR/EN templates in config.py, picked by detect_lang. Confirm/cancel use the language of the last user message.
 - Test 9 uses its own French word list, not detect_lang.
 
@@ -145,7 +145,7 @@ ROUTER
 - Lock = temporary, reversible lock (the only allowlisted action). Opposition = permanent, for lost/stolen cards, explained in FAQ docs only.
 - Invalid JSON or unknown route: one retry, then a fixed "please rephrase or ask for an advisor" message.
 - Non-allowlisted actions (transfer, unlock...): action agent says it cannot do it here and offers the FAQ procedure or an advisor; code enforces the allowlist anyway.
-- out_of_scope refusal = fixed template.
+- out_of_scope refusal = fixed template. (extended, see v1.2: ends with example questions)
 
 FAQ / RAG
 - Documents in English; answers in the user's language; "Source: <title>" forced in both languages.
@@ -163,14 +163,14 @@ ACCOUNT AGENT
 
 ACTIONS
 - propose_lock_card checks ownership and status in code; already locked -> answer says so, no pending action.
-- Pending action stays while the user types; replaced only by a new proposal; cleared by confirm, cancel or Clear conversation. Typing "yes" never executes: reply "please use the Confirm button".
+- (superseded, see v1.2) Pending action stays while the user types; replaced only by a new proposal; cleared by confirm, cancel or Clear conversation. Typing "yes" never executes: reply "please use the Confirm button".
 - On service_unavailable at confirm: keep the pending action (retry with the same key).
 - Second confirm returns "No pending action."
 - reason goes to the audit log only.
 - The session is authoritative; handle_turn's return value is for the UI.
 
 SESSION / AUDIT / TRACE
-- Session dict: session_id (uuid), history, pending_action, not_found_count, lang. Last 20 messages sent to models.
+- Session dict: session_id (uuid), history, pending_action, not_found_count, lang. Last 20 messages sent to models. (extended, see v1.2: handoff_done, authenticated)
 - Handoff does not end the conversation; summary max 3 lines.
 - Audit written step by step, including early exits and confirm/cancel.
 - Trace steps get a "sources" field. Use latency_ms in both trace and audit.
@@ -179,7 +179,66 @@ SESSION / AUDIT / TRACE
 UI / EVAL / TESTS
 - eval.py runs the real pipeline up to routing; expected values include a 6th one: "blocked".
 - Add a UI checkbox "Simulate bank API outage (demo)" that sets the runtime flag (approved addition).
-- Clear conversation = new session_id + clears pending action.
+- Clear conversation = new session_id + clears pending action. (extended, see v1.2: keeps the mode, shows the welcome message)
 - Live LLM tests: no retries, tight assertions. If a test is flaky, report it to me; never loosen it silently.
 - Stage 3 adds test 12: "What are your current mortgage rates?" -> FAQ answer says the information is not available and offers an advisor; it contains no rate or percentage.
 - Production line: "The agent logic stays the same; going to production replaces the mocks and the in-memory store, and adds strong authentication, an API gateway and monitoring."
+
+# Decisions v1.2 (stage 3b to stage 5 and fixes from manual testing)
+
+Rules added since v1.1. Where a v1.1 line conflicts, v1.2 wins.
+
+LANGUAGE
+- Sticky language: detect_lang returns "unknown" for a message of fewer than 3 words with no clear signal (French and English scores tied, e.g. "dis quoi", "ok"); the session language is then kept (initially English). The session language changes only on a clear "fr" or "en" detection.
+- The card label of the mock data is English ("Debit card ****4821"); French messages translate the card type ("carte de débit ****4821") via CARD_TYPES in config. The pending action keeps the English label.
+
+ROUTER
+- Routes: faq | account | action | handoff | out_of_scope | help.
+- The route is decided by the latest user message only; earlier messages are context only (e.g. to resolve "the credit one"), never a reason to repeat a previous route.
+- Questions about how to do something ("how do I", "how can I", "what should I do if", "comment faire", "que faire si") or hypothetical ones ("if I lose it") go to faq; only a direct request to act now ("lock my card", "bloque ma carte") goes to action. Both contrasting examples are in the router prompt.
+- help: questions about the assistant itself ("what can you do?", "que peux-tu faire ?", "for example?" right after a refusal) -> fixed FR/EN template listing the capabilities and 3 example questions.
+- out_of_scope template ends with two example questions ("For example: 'What is my balance?' or 'How long does a transfer take?'").
+- Input guardrails (moderation + injection check) run in parallel with the router; if a guardrail flags, the route is discarded and logged as "route_discarded".
+
+LOCAL REPLIES (no router call)
+- Courtesy words (COURTESY_WORDS in config: thanks, thank you, merci, ok, d'accord, hello, bonjour, bye, au revoir), matched on the whole normalised message -> fixed FR/EN courtesy reply.
+- A confirmation word (CONFIRM_WORDS) while an action is pending -> "please use the Confirm button"; it takes precedence over the courtesy reply ("ok", "d'accord" are in both lists).
+
+FAQ
+- The FAQ model returns JSON {found, answer, sources}. found=false -> fixed not-found template (offers an advisor) and the not-found counter goes up. Code appends "Source: <titles>", keeping only titles that were really retrieved.
+- When a FAQ answer uses the card opposition or lost/stolen card document, a fixed FR/EN line is added before the sources: "I can also lock one of your cards right now if you ask me to." (logged-in mode only).
+
+ACCOUNT AGENT
+- Tool errors: two fixed templates, one for service_unavailable, one for any other error; both name the service (SERVICE_NAMES in config).
+
+HANDOFF
+- The handoff answer is the fixed intro ("An advisor will take over... I've passed a summary of our conversation to the advisor, so you won't have to repeat yourself."); the 3-line summary goes to the trace and audit only.
+- Handoff once per session (session["handoff_done"]): a second handoff (asked or after 2 FAQ misses) gets the fixed "An advisor has already been notified..." template and no new summary. A new session resets it.
+- The handoff prompt says "logged-in customer" or "visitor, not logged in" according to the session.
+
+ACTIONS
+- Action agent tools: list_cards, propose_lock_card(card_id, reason), refuse_action(requested_action). refuse_action and any unknown tool -> fixed refusal template. confirm_action also checks the allowlist in code.
+- A successful proposal answers with a fixed template (temporary lock, opposition procedure for lost/stolen cards, confirm with the button); the model never writes it.
+- propose_lock_card accepts a card only if the latest user message names it (card type word in FR/EN, or its last 4 digits) and that matches exactly one active card (checked in code, whatever card_id the model chose). Otherwise: fixed "which card?" template listing the active cards, no pending action.
+- All identifiers must agree: given digits must match one of the customer's cards, and its type too if a type is given. Unknown or conflicting digits -> fixed "I can't find a card ending XXXX. Your active cards are: ..." template, no pending action. Digits of a locked card -> "already locked".
+- Single active card exception: if exactly one card is active and the message names no card ("lock my card"), that card is proposed (confirmation still required).
+- Any new user message other than a confirmation word clears the pending action (trace step "pending_cleared", Confirm card hidden). Handled in code right after: unknown digits -> "can't find"; a rejection ("not that card", REJECT_WORDS in config) with exactly one other active card left -> that card is proposed ("Do you want to lock your Credit card ****7350?"); a rejection otherwise -> "which card?"; a message naming exactly one active card -> that card is proposed; anything else is routed normally. The pending action is also cleared by confirm, cancel, Clear conversation and a mode switch.
+
+VISITOR MODE
+- Toggle at the top of the page: "Logged in as demo customer" (default) / "Visitor (not logged in)". session["authenticated"]; customer id = CUSTOMER_ID when logged in, None for a visitor (never C001).
+- Enforced in code: for a visitor, the account and action routes return the fixed login template without calling any agent or bank tool. Second barrier: the bank tool runner refuses any call without a customer id; confirm_action executes nothing for a visitor.
+- FAQ, help, out_of_scope and handoff still work for visitors. Help, welcome and out_of_scope have visitor variants (general questions and handoff only, "Log in to see your accounts and manage your cards.", FAQ-only examples). No "lock a card now" offer for visitors.
+- Any mode switch starts a new session: new session_id, empty history, no pending action, welcome message of the new mode, empty trace panel. Only the language is kept. The switch is audited with both session ids.
+
+OUTPUT MODERATION
+- Skipped when the answer is a fixed template from config (code-written text, marked as FixedText by _msg); the skip is logged in the trace. Model-written answers (FAQ, account agent) are always moderated.
+
+UI
+- Welcome message (FR/EN, mode-dependent) shown as the first assistant message for a new session and after Clear; display-only, never in the session history.
+- Send, Enter and example buttons: step 1 shows the question and a "…" placeholder at once, clears and disables the input box, disables Send and the examples; step 2 (handle_message, the single agent handler) runs the turn; step 3 re-enables the inputs (separate step so it also runs if step 2 fails).
+- Light mode forced whatever the OS setting (reload with ?__theme=light); banner text dark grey on light green (logged in) or light grey (visitor), WCAG AA contrast.
+- Confirm/Cancel results are separate chat bubbles (Chatbot group_consecutive_messages=False).
+- After Confirm/Cancel the right panel shows an action summary: button, simulated strong authentication, bank call with latency (from the audit), the first 8 characters of the idempotency key and "executed by code after customer confirmation" when the bank was called.
+- Trace panel: Markdown sections (route and reason, guardrails, model and tool calls with masked args and latency, sources, total time) plus a closed "Raw trace (JSON)" accordion.
+- Clear conversation keeps the current mode.
+

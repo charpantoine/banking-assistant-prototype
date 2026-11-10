@@ -177,9 +177,19 @@ MESSAGES = {
         "en": "Your {card} is already locked.",
         "fr": "Votre {card} est déjà bloquée.",
     },
-    "card_not_found": {
-        "en": "This card is not among your cards. Please tell me which of your cards you want to lock.",
-        "fr": "Cette carte ne fait pas partie de vos cartes. Merci de me dire laquelle de vos cartes bloquer.",
+    "card_not_found_digits": {
+        "en": "I can’t find a card ending {digits}. Your active cards are:\n\n{cards}",
+        "fr": "Je ne trouve pas de carte se terminant par {digits}. Vos cartes actives sont :\n\n{cards}",
+    },
+    "which_card": {
+        "en": "Which card do you want to lock?\n\n{cards}",
+        "fr": "Quelle carte voulez-vous bloquer ?\n\n{cards}",
+    },
+    "propose_other_card": {
+        "en": "Do you want to lock your {card}? This is a temporary lock that you can lift later. "
+              "Please confirm with the button below.",
+        "fr": "Voulez-vous bloquer votre {card} ? Ce blocage est temporaire et pourra être levé plus tard. "
+              "Merci de confirmer avec le bouton ci-dessous.",
     },
     "use_confirm_button": {
         "en": "To confirm, please use the Confirm button.",
@@ -252,6 +262,11 @@ CARD_TYPES = {
 
 # A message equal to one of these gets the fixed courtesy reply, without calling the router.
 COURTESY_WORDS = {"thanks", "thank you", "merci", "ok", "d'accord", "hello", "bonjour", "bye", "au revoir"}
+
+# Words that name a card type in a user message (FR/EN), per card type of the mock data.
+CARD_TYPE_WORDS = {"Debit card": {"debit", "débit"}, "Credit card": {"credit", "crédit"}}
+# Words that reject a proposed card ("not that card", "pas celle-là", "the other one").
+REJECT_WORDS = {"not", "no", "non", "pas", "other", "autre", "wrong", "mauvaise"}
 
 # The only action code will ever execute, after the Confirm button.
 ALLOWED_ACTIONS = {"lock_card"}

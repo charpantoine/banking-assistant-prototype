@@ -57,7 +57,9 @@ ACCOUNT_PROMPT = """You are the account assistant of a retail bank. The customer
 ACTION_PROMPT = """You are the action assistant of a retail bank. The only action you can prepare is a temporary, reversible lock of one of the customer's own cards.
 - To lock a card: call list_cards, then propose_lock_card with that card's id. propose_lock_card never locks anything: the customer confirms with a button.
 - If the customer named the card (its type, such as "debit" or "credit", or its last 4 digits) and exactly one card matches, propose that card right away, without asking.
-- Only if the customer has several cards and the request matches none or more than one, do not propose: ask which card, listing each one by type and last 4 digits.
+- If only one card is active and the customer did not name a card, propose that card.
+- Whatever card the customer names, call propose_lock_card with the closest card id: the code checks the details and answers if they do not match.
+- Only if the customer has several active cards and the request matches none or more than one, do not propose: ask which card, listing each one by type and last 4 digits.
 - For any other action (transfer, payment, unlocking a card, changing a limit, closing an account...), call refuse_action. Never say an action was done."""
 
 HANDOFF_PROMPT = """You prepare the handover of a retail banking conversation to a human advisor. Summarise the conversation below in at most 3 short lines: who the customer is in this conversation ({status}), what they need, what has already been answered. Facts only, no greeting."""
@@ -276,20 +278,76 @@ def _card_in(lang, card_label):
     return f"{config.CARD_TYPES.get(card_type, {}).get(lang, card_type)} {digits}"
 
 
+def _label(card):
+    """Card label as stored in a pending action, e.g. "Debit card ****4821"."""
+    return f"{card['type']} ****{card['last_4']}"
+
+
+def _card_identifiers(text):
+    """Card types (from FR/EN type words) and 4-digit groups the message gives."""
+    words = set(re.findall(r"[^\W\d_]+", text.lower()))
+    types = {card_type for card_type, type_words in config.CARD_TYPE_WORDS.items() if words & type_words}
+    return types, set(re.findall(r"(?<!\d)\d{4}(?!\d)", text))
+
+
+def _named_cards(text, cards):
+    """Cards the message names, every identifier agreeing: with digits, the card ending with them (and of the
+    type, if one is given); without digits, the cards of the type given."""
+    types, digits = _card_identifiers(text)
+    return [c for c in cards if (c["last_4"] in digits if digits else c["type"] in types)
+            and (not types or c["type"] in types)]
+
+
+def _unknown_digits(text, cards):
+    """The first 4-digit group that matches none of these cards (type agreeing, if given), or None."""
+    types, digits = _card_identifiers(text)
+    return next((d for d in sorted(digits) if not any(c["last_4"] == d and (not types or c["type"] in types)
+                                                      for c in cards)), None)
+
+
+def _card_list(cards, lang):
+    """Cards as a Markdown list of labels in the answer language."""
+    return "\n".join(f"- {_card_in(lang, _label(c))}" for c in cards)
+
+
+def _which_card(cards, lang):
+    """Fixed "which card?" message listing the given cards by type and last 4 digits."""
+    return _msg("which_card", lang, cards=_card_list(cards, lang))
+
+
+def _card_not_found(digits, active, lang):
+    """Fixed "I can't find a card ending ..." message listing the active cards."""
+    return _msg("card_not_found_digits", lang, digits=digits, cards=_card_list(active, lang))
+
+
+def _store_proposal(card, session, key):
+    """Store the pending lock of one card (nothing is executed) and return it with its fixed message."""
+    session["pending_action"] = {"action": "lock_card", "card_id": card["id"], "card_label": _label(card),
+                                 "idempotency_key": str(uuid.uuid4())}
+    return session["pending_action"], _msg(key, session["lang"], card=_card_in(session["lang"], _label(card)))
+
+
 def _propose_lock_card(card_id, session):
-    """Check in code that the card is the customer's and active, then store the pending lock; nothing is executed."""
+    """Checked in code, whatever the model chose: every identifier in the latest user message must agree with
+    one card. Unknown or conflicting digits: "can't find"; a locked card: "already locked"; no identifier and one
+    active card: that card; otherwise exactly one active card must match, else "which card?". Nothing is executed."""
     lang, cards = session["lang"], _run_tool("list_cards", {}, _customer_id(session))
     if "error" in cards:
         return cards, _tool_error("propose_lock_card", cards, lang)
-    card = next((c for c in cards["cards"] if c["id"] == card_id), None)
-    if card is None:
-        return {"error": "not_allowed"}, _msg("card_not_found", lang)
-    label = f"{card['type']} ****{card['last_4']}"
-    if card["status"] != "active":
-        return {"error": "already_locked"}, _msg("card_already_locked", lang, card=_card_in(lang, label))
-    session["pending_action"] = {"action": "lock_card", "card_id": card["id"], "card_label": label,
-                                 "idempotency_key": str(uuid.uuid4())}
-    return session["pending_action"], _msg("lock_proposed", lang, card=_card_in(lang, label))
+    text = session["history"][-1]["content"]
+    active = [c for c in cards["cards"] if c["status"] == "active"]
+    unknown = _unknown_digits(text, cards["cards"])
+    if unknown:
+        return {"error": "card_not_found"}, _card_not_found(unknown, active, lang)
+    named = _named_cards(text, cards["cards"])
+    if len(named) == 1 and named[0]["status"] != "active":
+        return {"error": "already_locked"}, _msg("card_already_locked", lang, card=_card_in(lang, _label(named[0])))
+    named_active = [c for c in named if c["status"] == "active"]
+    if _card_identifiers(text) == (set(), set()) and len(active) == 1:  # "lock my card" with one active card
+        named_active = active
+    if len(named_active) != 1 or named_active[0]["id"] != card_id:
+        return {"error": "card_not_named"}, _which_card(active, lang)
+    return _store_proposal(named_active[0], session, "lock_proposed")
 
 
 def _action_call(name, args, session):
@@ -405,8 +463,30 @@ def _local_reply_key(text, session):
     return "courtesy" if words in config.COURTESY_WORDS else None
 
 
+def _pending_followup(text, rejected, session):
+    """Reply to a message that cleared a proposal, in code: unknown digits get "can't find"; a message naming
+    exactly one active card proposes it; a rejection proposes the only other active card, or asks which card.
+    None means normal routing."""
+    cards = _run_tool("list_cards", {}, _customer_id(session))
+    if "error" in cards:
+        return None
+    active = [c for c in cards["cards"] if c["status"] == "active"]
+    unknown = _unknown_digits(text, cards["cards"])
+    if unknown:
+        return _card_not_found(unknown, active, session["lang"])
+    others = [c for c in active if c["id"] != rejected["card_id"]]
+    named = _named_cards(text, active)
+    if set(re.findall(r"[^\W\d_]+", text.lower())) & config.REJECT_WORDS:
+        named_others = [c for c in named if c in others]
+        choice = named_others if len(named_others) == 1 else others
+        if len(choice) == 1:
+            return _store_proposal(choice[0], session, "propose_other_card")[1]
+        return _which_card(active, session["lang"])
+    return _store_proposal(named[0], session, "lock_proposed")[1] if len(named) == 1 else None
+
+
 def _log_route(decision, ms, discarded, session, trace):
-    """Log the router decision; when it is not used (input blocked) log it as discarded."""
+    """Log the router decision; when it is not used (input blocked, pending follow-up) log it as discarded."""
     summary = f"{decision['route']}: {decision['reason']}"
     if discarded:
         _step(session, trace, "route_discarded", "router", config.ROUTER_MODEL, {}, f"{summary} (discarded: {discarded})", ms)
@@ -415,14 +495,20 @@ def _log_route(decision, ms, discarded, session, trace):
 
 
 def handle_turn(user_message, session):
-    """One turn: input guardrails, in parallel with the router unless a local reply (typed "yes", courtesy word)
-    needs no router; then agent and output moderation. A flagged message discards the route.
+    """One turn: any message other than a confirmation word clears the pending action; input guardrails run in
+    parallel with the router unless a local reply (typed "yes", courtesy word) needs no router; a reply to a
+    cleared proposal is handled in code; otherwise agent and output moderation. A flagged message discards the route.
     Returns (answer, trace, pending_action); the session is the source of truth."""
     trace, start = [], time.perf_counter()
     lang = detect_lang(user_message)
     session["lang"] = session["lang"] if lang == "unknown" else lang  # switch only on a clear detection
     history = session["history"] + [{"role": "user", "content": user_message}]
     local = _local_reply_key(user_message, session)
+    rejected = session["pending_action"] if local != "use_confirm_button" else None
+    if rejected:  # a typed "yes" keeps the proposal; anything else clears it
+        session["pending_action"] = None
+        _step(session, trace, "pending_cleared", "session", "pending_action", {"card_id": rejected["card_id"]},
+              "new message: proposal cleared", 0)
     with ThreadPoolExecutor(max_workers=1) as pool:
         routing = None if local else pool.submit(_timed, route, history)  # runs while the guardrails run
         answer = _input_refusal(user_message, session, trace)
@@ -436,8 +522,9 @@ def handle_turn(user_message, session):
             _step(session, trace, "local_reply", "guardrails", local, {"text": user_message}, "router not called", 0)
             answer = _msg(local, session["lang"])
         else:
-            _log_route(decision, route_ms, None, session, trace)
-            answer = _output_checked(_run_agent(decision["route"], session, trace), session, trace)
+            followup = _pending_followup(user_message, rejected, session) if rejected else None
+            _log_route(decision, route_ms, "pending follow-up" if followup else None, session, trace)
+            answer = _output_checked(followup or _run_agent(decision["route"], session, trace), session, trace)
         session["history"].append({"role": "assistant", "content": answer})
     _step(session, trace, "answer", "assistant", "handle_turn", {}, answer[:200], (time.perf_counter() - start) * 1000)
     return answer, trace, session["pending_action"]

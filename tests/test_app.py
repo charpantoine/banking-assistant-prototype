@@ -151,3 +151,15 @@ def test_no_balance_left_after_switching_to_visitor():
     chat, state, *_ = app.handle_mode(config.MODE_VISITOR, state)
     assert not shows_balance(chat) and not shows_balance(state["session"]["history"])
     assert state["session"]["history"] == [] and chat == app.welcome_chat("en", authenticated=False)
+
+
+def test_new_message_clears_pending_and_hides_card():
+    """Any new message other than a confirmation word clears the pending action and hides the Confirm card."""
+    state = app.new_state()
+    state["session"]["pending_action"] = {"action": "lock_card", "card_id": "CARD-1001",
+                                          "card_label": "Debit card ****4821", "idempotency_key": "key-1"}
+    chat, state, panel, raw, card, card_text, _ = app.handle_message("merci", state)
+    assert state["session"]["pending_action"] is None
+    assert card["visible"] is False and card_text == ""
+    assert any(step["step"] == "pending_cleared" for step in raw)
+    assert bank_api.list_cards(config.CUSTOMER_ID)["cards"][0]["status"] == "active"
