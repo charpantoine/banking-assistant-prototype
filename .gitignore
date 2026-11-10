@@ -9,3 +9,4 @@ __pycache__/
 .vscode/
 audit.db
 data/index.npz
+eval_results.csv
