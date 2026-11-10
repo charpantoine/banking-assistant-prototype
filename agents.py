@@ -3,6 +3,7 @@ import json
 import re
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -23,16 +24,22 @@ _ENGLISH_WORDS = {
     "account", "balance", "want", "lock",
 }
 
-ROUTER_PROMPT = """You are the router of a retail banking assistant. Classify the customer's LATEST message into exactly one route, using the earlier messages only as context.
+ROUTER_PROMPT = """You are the router of a retail banking assistant. Classify the customer's LATEST message into exactly one route.
+The route is decided by the latest user message only. Earlier messages are context only (for example to understand "the credit one"), never a reason to repeat a previous route.
 
 Routes:
-- faq: general questions about the bank's products, fees, procedures and policies, answered from the bank's documents. Questions such as "how do I file a complaint?" or "how do I contact an advisor?" are faq.
+- faq: general questions about the bank's products, fees, procedures and policies, answered from the bank's documents. Questions such as "how do I file a complaint?" or "how do I contact an advisor?" are faq. Any question about HOW to do something ("how do I", "how can I", "what should I do if", "comment faire", "comment puis-je", "que faire si") or about a hypothetical situation ("if I lose it", "si je la perds") is faq, even when it is about locking or blocking a card.
 - account: questions about this customer's own data: balances, transactions, cards, and the opening hours of their own branch. "What are my branch's opening hours?" is account, not faq.
-- action: the customer asks the assistant to do something, such as locking or blocking a card, including requests the assistant may not be allowed to do (transfer, unlock). "My card was stolen, block it" is action.
+- action: a direct request for the assistant to act now, such as locking or blocking a card, including requests the assistant may not be allowed to do (transfer, unlock). "My card was stolen, block it" is action.
+
+Contrasting examples:
+- "How do I lock my card if I lose it?" -> faq (asks how, hypothetical)
+- "Lock my card" / "Bloque ma carte" -> action (direct request to act now)
 - handoff: an explicit request to talk to a human now, clear frustration, or a sensitive situation (a complaint being made, a fraud victim, a bereavement).
 - out_of_scope: anything not about banking.
+- help: questions about the assistant itself: what it can do, what kind of questions to ask, or "for example?" right after a refusal ("what can you do?", "que peux-tu faire ?", "à quelles questions par exemple ?").
 
-Reply with JSON only: {"route": "<faq|account|action|handoff|out_of_scope>", "reason": "<short reason in English>"}"""
+Reply with JSON only: {"route": "<faq|account|action|handoff|out_of_scope|help>", "reason": "<short reason in English>"}"""
 
 FAQ_PROMPT = """You are the FAQ assistant of a retail bank. Answer the customer's latest question using ONLY the document excerpts below. Never use general knowledge, never guess, never add figures that are not in the excerpts.
 If the excerpts do not contain the answer, set "found" to false.
@@ -53,7 +60,7 @@ ACTION_PROMPT = """You are the action assistant of a retail bank. The only actio
 - Only if the customer has several cards and the request matches none or more than one, do not propose: ask which card, listing each one by type and last 4 digits.
 - For any other action (transfer, payment, unlocking a card, changing a limit, closing an account...), call refuse_action. Never say an action was done."""
 
-HANDOFF_PROMPT = """You prepare the handover of a retail banking conversation to a human advisor. Summarise the conversation below in at most 3 short lines: who the customer is in this conversation (logged-in customer), what they need, what has already been answered. Facts only, no greeting."""
+HANDOFF_PROMPT = """You prepare the handover of a retail banking conversation to a human advisor. Summarise the conversation below in at most 3 short lines: who the customer is in this conversation ({status}), what they need, what has already been answered. Facts only, no greeting."""
 
 _LANGUAGE_NAMES = {"en": "English", "fr": "French"}
 
@@ -85,11 +92,15 @@ _TOOL_PARAMETERS = {t["function"]["name"]: t["function"]["parameters"]["properti
 
 
 def detect_lang(text):
-    """Return "fr" if French words and accented letters outnumber English words, else "en"."""
+    """Return "fr" if French words and accented letters outnumber English words, "en" if not; "unknown" for a
+    message of fewer than 3 words with no clear signal (tie), so the caller keeps the session language."""
     lowered = text.lower()
     words = re.findall(r"[^\W\d_]+", lowered)
     french = sum(w in _FRENCH_WORDS for w in words) + len(re.findall(r"[àâçéèêëîïôûùüÿœ]", lowered))
-    return "fr" if french > sum(w in _ENGLISH_WORDS for w in words) else "en"
+    english = sum(w in _ENGLISH_WORDS for w in words)
+    if len(words) < 3 and french == english:
+        return "unknown"
+    return "fr" if french > english else "en"
 
 
 def route(history):
@@ -110,14 +121,39 @@ def route(history):
     return {"route": "error", "reason": reason}
 
 
-def new_session():
-    """Create the per-conversation state; the session is the source of truth across turns."""
-    return {"session_id": str(uuid.uuid4()), "history": [], "pending_action": None, "not_found_count": 0, "lang": "en"}
+def new_session(authenticated=True):
+    """Create the per-conversation state, logged in by default; the session is the source of truth across turns."""
+    return {"session_id": str(uuid.uuid4()), "history": [], "pending_action": None, "not_found_count": 0,
+            "lang": "en", "handoff_done": False, "authenticated": authenticated}
+
+
+def _customer_id(session):
+    """The customer id for bank calls: CUSTOMER_ID when logged in, None for a visitor (never C001)."""
+    return config.CUSTOMER_ID if session["authenticated"] else None
+
+
+def _mode_key(key, session):
+    """Template key for the session mode: e.g. "help" when logged in, "help_visitor" for a visitor."""
+    return key if session["authenticated"] else f"{key}_visitor"
+
+
+def switch_mode(session, authenticated):
+    """Logged in <-> visitor starts a new session (new id, empty history, no pending action), so nothing from the
+    other mode carries over; only the language is kept. The audit event records both session ids."""
+    new = new_session(bool(authenticated))
+    new["lang"] = session["lang"]
+    _step(new, [], "mode_switch", "session", "switch_mode", {"from_session": session["session_id"],
+          "to_session": new["session_id"], "authenticated": new["authenticated"]}, "new session", 0)
+    return new
+
+
+class FixedText(str):
+    """A str written by code from a config template; output moderation skips it (no model text inside)."""
 
 
 def _msg(key, lang, **values):
-    """Return a fixed message from config in the given language, with its placeholders filled."""
-    return config.MESSAGES[key][lang].format(**values)
+    """Return a fixed message from config in the given language, placeholders filled, marked as FixedText."""
+    return FixedText(config.MESSAGES[key][lang].format(**values))
 
 
 def _system(prompt, lang):
@@ -160,7 +196,8 @@ def _parse_json(raw):
 
 
 def faq_agent(session, trace):
-    """Answer only from retrieved FAQ chunks and append "Source: <titles>"; None when the documents do not answer."""
+    """Answer only from retrieved FAQ chunks and append "Source: <titles>"; None when the documents do not answer.
+    If a card lock/loss document was used, a fixed line offers to lock a card now."""
     query = "\n".join([m["content"] for m in session["history"] if m["role"] == "user"][-2:])
     chunks, ms = _timed(rag.search, query)
     titles = list(dict.fromkeys(c["title"] for c in chunks))
@@ -175,15 +212,22 @@ def faq_agent(session, trace):
     used = [t for t in titles if t in reply.get("sources", [])] or titles  # only titles really retrieved
     _step(session, trace, "model_call", "faq", config.AGENT_MODEL, {}, "found" if answer else "not found", ms,
           used if answer else [])
-    return f"{answer}\n\nSource: {', '.join(used)}" if answer else None
+    if not answer:
+        return None
+    offer = session["authenticated"] and any(c["source"] in config.CARD_LOCK_DOCS for c in chunks if c["title"] in used)
+    offer_line = f"\n\n{_msg('lock_offer', session['lang'])}" if offer else ""
+    return f"{answer}{offer_line}\n\nSource: {', '.join(used)}"
 
 
-def _run_tool(name, args):
-    """Run a read-only account tool with CUSTOMER_ID injected by code, keeping only declared arguments."""
+def _run_tool(name, args, customer_id):
+    """Run a read-only account tool with the customer id injected by code, keeping only declared arguments.
+    Second barrier: with no customer id (visitor), no bank call is made."""
+    if customer_id is None:
+        return {"error": "not_authenticated", "message": "No logged-in customer."}
     if name not in _TOOL_PARAMETERS:
         return {"error": "unknown_tool", "message": f"Unknown tool {name}."}
     allowed = {k: v for k, v in args.items() if k in _TOOL_PARAMETERS[name]}
-    return getattr(bank_api, name)(config.CUSTOMER_ID, **allowed)
+    return getattr(bank_api, name)(customer_id, **allowed)
 
 
 def _tool_error(tool, result, lang):
@@ -217,7 +261,7 @@ def _tool_loop(session, trace, agent, prompt, tools, handle_call):
 
 def _account_call(name, args, session):
     """Run a read-only account tool; any error ends the turn with the fixed message naming the service."""
-    result = _run_tool(name, args)
+    result = _run_tool(name, args, _customer_id(session))
     return result, _tool_error(name, result, session["lang"]) if "error" in result else None
 
 
@@ -226,9 +270,15 @@ def account_agent(session, trace):
     return _tool_loop(session, trace, "account", ACCOUNT_PROMPT, ACCOUNT_TOOLS, _account_call)
 
 
+def _card_in(lang, card_label):
+    """Card label in the answer language: the English card type of the mock data is translated for French."""
+    card_type, _, digits = card_label.rpartition(" ")
+    return f"{config.CARD_TYPES.get(card_type, {}).get(lang, card_type)} {digits}"
+
+
 def _propose_lock_card(card_id, session):
     """Check in code that the card is the customer's and active, then store the pending lock; nothing is executed."""
-    lang, cards = session["lang"], bank_api.list_cards(config.CUSTOMER_ID)
+    lang, cards = session["lang"], _run_tool("list_cards", {}, _customer_id(session))
     if "error" in cards:
         return cards, _tool_error("propose_lock_card", cards, lang)
     card = next((c for c in cards["cards"] if c["id"] == card_id), None)
@@ -236,16 +286,16 @@ def _propose_lock_card(card_id, session):
         return {"error": "not_allowed"}, _msg("card_not_found", lang)
     label = f"{card['type']} ****{card['last_4']}"
     if card["status"] != "active":
-        return {"error": "already_locked"}, _msg("card_already_locked", lang, card=label)
+        return {"error": "already_locked"}, _msg("card_already_locked", lang, card=_card_in(lang, label))
     session["pending_action"] = {"action": "lock_card", "card_id": card["id"], "card_label": label,
                                  "idempotency_key": str(uuid.uuid4())}
-    return session["pending_action"], _msg("lock_proposed", lang, card=label)
+    return session["pending_action"], _msg("lock_proposed", lang, card=_card_in(lang, label))
 
 
 def _action_call(name, args, session):
     """Action tools: list_cards reads, propose_lock_card only proposes, refuse_action and unknown tools refuse."""
     if name == "list_cards":
-        result = _run_tool(name, args)
+        result = _run_tool(name, args, _customer_id(session))
         return result, _tool_error(name, result, session["lang"]) if "error" in result else None
     if name == "propose_lock_card":
         return _propose_lock_card(args.get("card_id"), session)
@@ -261,10 +311,22 @@ def handoff_agent(session, trace):
     """Write a 3-line summary for the advisor (trace and audit only) and return the fixed handoff message."""
     transcript = "\n".join(f"{'Customer' if m['role'] == 'user' else 'Assistant'}: {m['content']}"
                            for m in session["history"][-config.HISTORY_LIMIT:])
-    message, ms = _chat([_system(HANDOFF_PROMPT, session["lang"]), {"role": "user", "content": transcript}])
+    status = "logged-in customer" if session["authenticated"] else "visitor, not logged in"
+    prompt = HANDOFF_PROMPT.replace("{status}", status)
+    message, ms = _chat([_system(prompt, session["lang"]), {"role": "user", "content": transcript}])
     summary = "\n".join([line.strip() for line in (message.content or "").splitlines() if line.strip()][:3])
     _step(session, trace, "handoff_summary", "handoff", config.AGENT_MODEL, {}, summary, ms)
     return _msg("handoff", session["lang"])
+
+
+def _handoff_turn(session, trace):
+    """Hand off once per session; later handoffs get the fixed "already notified" message and no new summary."""
+    if session["handoff_done"]:
+        _step(session, trace, "handoff_skipped", "handoff", "handoff_done", {}, "already notified, no new summary", 0)
+        return _msg("handoff_already", session["lang"])
+    answer = handoff_agent(session, trace)
+    session["handoff_done"] = True  # set after the summary, so a failed call can be retried
+    return answer
 
 
 def _faq_turn(session, trace):
@@ -273,15 +335,21 @@ def _faq_turn(session, trace):
     session["not_found_count"] = 0 if answer else session["not_found_count"] + 1
     if session["not_found_count"] >= 2:
         session["not_found_count"] = 0
-        return handoff_agent(session, trace)
+        return _handoff_turn(session, trace)
     return answer or _msg("faq_not_found", session["lang"])
 
 
 def _run_agent(route_name, session, trace):
-    """Dispatch to the agent of the route; out_of_scope and router errors get fixed messages."""
+    """Dispatch to the agent of the route. Visitors get the login message for account and action;
+    help, out_of_scope and router errors get fixed messages for the session mode."""
     if route_name != "faq":
         session["not_found_count"] = 0
-    agents = {"faq": _faq_turn, "account": account_agent, "action": action_agent, "handoff": handoff_agent}
+    if route_name in ("account", "action") and not session["authenticated"]:  # enforced in code, not in a prompt
+        _step(session, trace, "auth_check", "session", route_name, {}, "visitor: no agent, no bank call", 0)
+        return _msg("login_required", session["lang"])
+    if route_name in ("help", "out_of_scope"):
+        return _msg(_mode_key(route_name, session), session["lang"])
+    agents = {"faq": _faq_turn, "account": account_agent, "action": action_agent, "handoff": _handoff_turn}
     agent = agents.get(route_name)
     if agent:
         try:
@@ -289,7 +357,7 @@ def _run_agent(route_name, session, trace):
         except Exception as error:  # API failure inside an agent: logged, never shown raw
             _step(session, trace, "error", route_name, type(error).__name__, {}, "agent failed", 0)
             return _msg("incomplete", session["lang"])
-    return _msg("out_of_scope" if route_name == "out_of_scope" else "router_error", session["lang"])
+    return _msg("router_error", session["lang"])
 
 
 def _moderated(text, direction, session, trace):
@@ -317,39 +385,59 @@ def _input_refusal(text, session, trace):
 
 
 def _output_checked(answer, session, trace):
-    """Moderate the final answer; a flagged answer or a moderation failure gives a fixed message."""
+    """Moderate the final answer; a flagged answer or a moderation failure gives a fixed message.
+    A fixed template from config is code-written text: moderation is skipped and the skip is logged."""
+    if isinstance(answer, FixedText):
+        _step(session, trace, "output_moderation", "guardrails", "skipped", {}, "skipped: fixed template", 0)
+        return answer
     result = _moderated(answer, "output", session, trace)
     if result is None:
         return _msg("moderation_unavailable", session["lang"])
     return _msg("output_fallback", session["lang"]) if result["flagged"] else answer
 
 
-def _typed_confirmation(text, session, trace):
-    """A typed "yes" never executes the pending action: return the "use the Confirm button" message, else None."""
+def _local_reply_key(text, session):
+    """Template key for a message answered without the router, else None: a typed "yes" while an action is
+    pending (never executes: use the button), then a courtesy word ("thanks", "merci"...)."""
     words = " ".join(text.lower().replace("\u2019", "'").strip(" .!?").split())
-    if session["pending_action"] is None or words not in config.CONFIRM_WORDS:
-        return None
-    _step(session, trace, "typed_confirmation", "guardrails", "pending_action", {"text": text}, "not executed", 0)
-    return _msg("use_confirm_button", session["lang"])
+    if session["pending_action"] is not None and words in config.CONFIRM_WORDS:
+        return "use_confirm_button"
+    return "courtesy" if words in config.COURTESY_WORDS else None
 
 
-def _routed_answer(session, trace):
-    """Route the latest message, run its agent and moderate the answer."""
-    decision, ms = _timed(route, session["history"])
-    _step(session, trace, "route", "router", config.ROUTER_MODEL, {"messages": len(session["history"])},
-          f"{decision['route']}: {decision['reason']}", ms)
-    return _output_checked(_run_agent(decision["route"], session, trace), session, trace)
+def _log_route(decision, ms, discarded, session, trace):
+    """Log the router decision; when it is not used (input blocked) log it as discarded."""
+    summary = f"{decision['route']}: {decision['reason']}"
+    if discarded:
+        _step(session, trace, "route_discarded", "router", config.ROUTER_MODEL, {}, f"{summary} (discarded: {discarded})", ms)
+    else:
+        _step(session, trace, "route", "router", config.ROUTER_MODEL, {}, summary, ms)
 
 
 def handle_turn(user_message, session):
-    """One turn: input guardrails, typed-yes check, router, agent, output moderation.
-    Returns (answer, trace, pending_action); the session stays the source of truth."""
+    """One turn: input guardrails, in parallel with the router unless a local reply (typed "yes", courtesy word)
+    needs no router; then agent and output moderation. A flagged message discards the route.
+    Returns (answer, trace, pending_action); the session is the source of truth."""
     trace, start = [], time.perf_counter()
-    session["lang"] = detect_lang(user_message)
-    answer = _input_refusal(user_message, session, trace)
-    if answer is None:  # flagged messages never enter the history
-        session["history"].append({"role": "user", "content": user_message})
-        answer = _typed_confirmation(user_message, session, trace) or _routed_answer(session, trace)
+    lang = detect_lang(user_message)
+    session["lang"] = session["lang"] if lang == "unknown" else lang  # switch only on a clear detection
+    history = session["history"] + [{"role": "user", "content": user_message}]
+    local = _local_reply_key(user_message, session)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        routing = None if local else pool.submit(_timed, route, history)  # runs while the guardrails run
+        answer = _input_refusal(user_message, session, trace)
+        decision, route_ms = routing.result() if routing else (None, 0)
+    if answer is not None:  # flagged: route discarded, message never enters the history
+        if routing:
+            _log_route(decision, route_ms, "input blocked", session, trace)
+    else:
+        session["history"].append(history[-1])
+        if local:
+            _step(session, trace, "local_reply", "guardrails", local, {"text": user_message}, "router not called", 0)
+            answer = _msg(local, session["lang"])
+        else:
+            _log_route(decision, route_ms, None, session, trace)
+            answer = _output_checked(_run_agent(decision["route"], session, trace), session, trace)
         session["history"].append({"role": "assistant", "content": answer})
     _step(session, trace, "answer", "assistant", "handle_turn", {}, answer[:200], (time.perf_counter() - start) * 1000)
     return answer, trace, session["pending_action"]
@@ -363,20 +451,23 @@ def _closing_message(session, step, args, answer):
 
 
 def confirm_action(session):
-    """Execute the pending action with CUSTOMER_ID and its idempotency key, if allowlisted; returns the message.
+    """Execute the pending action with the customer id and its idempotency key, if logged in and allowlisted.
     An outage keeps the pending action so a retry reuses the same key; any other result clears it."""
-    lang, pending = session["lang"], session["pending_action"]
+    lang, pending, customer_id = session["lang"], session["pending_action"], _customer_id(session)
     if pending is None:
         return _closing_message(session, "confirm", {}, _msg("no_pending_action", lang))
+    if customer_id is None:  # visitor: nothing is executed
+        session["pending_action"] = None
+        return _closing_message(session, "confirm", pending, _msg("login_required", lang))
     if pending["action"] not in config.ALLOWED_ACTIONS:
         session["pending_action"] = None
         return _closing_message(session, "confirm", pending, _msg("action_refused", lang))
-    result, ms = _timed(bank_api.lock_card, config.CUSTOMER_ID, pending["card_id"], pending["idempotency_key"])
+    result, ms = _timed(bank_api.lock_card, customer_id, pending["card_id"], pending["idempotency_key"])
     _step(session, [], "action", "action", "lock_card", pending, json.dumps(result), ms)
     if result.get("error") != "service_unavailable":
         session["pending_action"] = None
-    answer = _tool_error("lock_card", result, lang) if "error" in result else _msg("lock_done", lang,
-                                                                                  card=pending["card_label"])
+    done = _msg("lock_done", lang, card=_card_in(lang, pending["card_label"]))
+    answer = _tool_error("lock_card", result, lang) if "error" in result else done
     return _closing_message(session, "confirm", pending, answer)
 
 
