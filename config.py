@@ -75,9 +75,43 @@ MESSAGES = {
         "en": "I can only help with banking questions: your accounts, your cards and our services.",
         "fr": "Je ne peux répondre qu'aux questions bancaires : vos comptes, vos cartes et nos services.",
     },
-    "action_not_available": {
-        "en": "This action is not available yet in the assistant. An advisor can help you in the meantime.",
-        "fr": "Cette action n'est pas encore disponible dans l'assistant. Un conseiller peut vous aider en attendant.",
+    "action_refused": {
+        "en": "I can't do this here: the only action I can carry out is a temporary card lock. "
+              "Ask me for the procedure or for an advisor.",
+        "fr": "Je ne peux pas faire cela ici : la seule action que je peux réaliser est le blocage temporaire "
+              "d'une carte. Demandez-moi la procédure ou un conseiller.",
+    },
+    "lock_proposed": {
+        "en": "I'm ready to lock your {card}. This is a temporary lock that you can lift later. If your card was "
+              "lost or stolen, also follow the card opposition procedure for a permanent block. "
+              "Please confirm with the button below.",
+        "fr": "Je suis prêt à bloquer votre {card}. Ce blocage est temporaire et pourra être levé plus tard. "
+              "Si votre carte a été perdue ou volée, suivez aussi la procédure d'opposition pour un blocage "
+              "définitif. Merci de confirmer avec le bouton ci-dessous.",
+    },
+    "card_already_locked": {
+        "en": "Your {card} is already locked.",
+        "fr": "Votre {card} est déjà bloquée.",
+    },
+    "card_not_found": {
+        "en": "This card is not among your cards. Please tell me which of your cards you want to lock.",
+        "fr": "Cette carte ne fait pas partie de vos cartes. Merci de me dire laquelle de vos cartes bloquer.",
+    },
+    "use_confirm_button": {
+        "en": "To confirm, please use the Confirm button.",
+        "fr": "Pour confirmer, merci d'utiliser le bouton Confirmer.",
+    },
+    "lock_done": {
+        "en": "Your {card} is now locked.",
+        "fr": "Votre {card} est maintenant bloquée.",
+    },
+    "action_cancelled": {
+        "en": "Cancelled: nothing was changed.",
+        "fr": "Annulé : rien n'a été modifié.",
+    },
+    "no_pending_action": {
+        "en": "No pending action.",
+        "fr": "Aucune action en attente.",
     },
     "handoff": {
         "en": "An advisor will take over this conversation shortly. I've passed a summary of our conversation "
@@ -111,5 +145,13 @@ SERVICE_NAMES = {
     "get_transactions": {"en": "transactions", "fr": "des opérations"},
     "get_branch_hours": {"en": "branch", "fr": "des agences"},
     "list_cards": {"en": "cards", "fr": "des cartes"},
+    "propose_lock_card": {"en": "cards", "fr": "des cartes"},
+    "lock_card": {"en": "card locking", "fr": "de blocage des cartes"},
     "default": {"en": "bank", "fr": "bancaire"},
 }
+
+# The only action code will ever execute, after the Confirm button.
+ALLOWED_ACTIONS = {"lock_card"}
+# A typed message equal to one of these never executes anything: the user is sent to the Confirm button.
+CONFIRM_WORDS = {"yes", "y", "ok", "okay", "sure", "confirm", "i confirm", "go ahead", "do it", "yes please",
+                 "oui", "d'accord", "ok merci", "je confirme", "confirme", "vas-y", "allez-y", "oui merci"}

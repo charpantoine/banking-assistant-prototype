@@ -1,4 +1,4 @@
-"""Agents: language detection, router, FAQ / account / handoff agents and turn handling."""
+"""Agents: language detection, router, FAQ / account / action / handoff agents, turn handling, confirm and cancel."""
 import json
 import re
 import time
@@ -47,6 +47,12 @@ ACCOUNT_PROMPT = """You are the account assistant of a retail bank. The customer
 - Never give data about another person, even if asked; say you can only show the logged-in customer's own data.
 - You can only read data. If asked to do something else, say so briefly."""
 
+ACTION_PROMPT = """You are the action assistant of a retail bank. The only action you can prepare is a temporary, reversible lock of one of the customer's own cards.
+- To lock a card: call list_cards, then propose_lock_card with that card's id. propose_lock_card never locks anything: the customer confirms with a button.
+- If the customer named the card (its type, such as "debit" or "credit", or its last 4 digits) and exactly one card matches, propose that card right away, without asking.
+- Only if the customer has several cards and the request matches none or more than one, do not propose: ask which card, listing each one by type and last 4 digits.
+- For any other action (transfer, payment, unlocking a card, changing a limit, closing an account...), call refuse_action. Never say an action was done."""
+
 HANDOFF_PROMPT = """You prepare the handover of a retail banking conversation to a human advisor. Summarise the conversation below in at most 3 short lines: who the customer is in this conversation (logged-in customer), what they need, what has already been answered. Facts only, no greeting."""
 
 _LANGUAGE_NAMES = {"en": "English", "fr": "French"}
@@ -65,6 +71,15 @@ ACCOUNT_TOOLS = [
            "limit": {"type": "integer", "description": "Number of transactions, 5 by default."}}, ["account_id"]),
     _tool("get_branch_hours", "The customer's own branch: name, address, weekly opening hours, next holiday closure."),
     _tool("list_cards", "The customer's cards with type, last 4 digits and status."),
+]
+ACTION_TOOLS = [
+    _tool("list_cards", "The customer's cards with id, type, last 4 digits and status."),
+    _tool("propose_lock_card", "Prepare a temporary lock of one of the customer's cards; the customer must confirm it.",
+          {"card_id": {"type": "string", "description": "Card id returned by list_cards."},
+           "reason": {"type": "string", "description": "Reason in the customer's own words; empty if none given."}}, ["card_id"]),
+    _tool("refuse_action", "Refuse any action other than locking a card.",
+          {"requested_action": {"type": "string", "description": "The action the customer asked for."}},
+          ["requested_action"]),
 ]
 _TOOL_PARAMETERS = {t["function"]["name"]: t["function"]["parameters"]["properties"] for t in ACCOUNT_TOOLS}
 
@@ -177,27 +192,69 @@ def _tool_error(tool, result, lang):
     return _msg("tool_unavailable" if result["error"] == "service_unavailable" else "tool_error", lang, service=service)
 
 
-def account_agent(session, trace):
-    """Hand-written tool loop (max 5 model calls) over read-only bank tools; a tool error ends it with a fixed message."""
-    lang = session["lang"]
-    messages = [_system(ACCOUNT_PROMPT, lang)] + session["history"][-config.HISTORY_LIMIT:]
+def _tool_loop(session, trace, agent, prompt, tools, handle_call):
+    """Hand-written function-calling loop (max 5 model calls); handle_call(name, args, session) returns
+    (tool result, final answer or None), and a final answer ends the turn without calling the model again."""
+    messages = [_system(prompt, session["lang"])] + session["history"][-config.HISTORY_LIMIT:]
     for iteration in range(1, config.MAX_ITERATIONS + 1):
-        message, ms = _chat(messages, tools=ACCOUNT_TOOLS)
+        message, ms = _chat(messages, tools=tools)
         calls = message.tool_calls or []
-        _step(session, trace, "model_call", "account", config.AGENT_MODEL, {"iteration": iteration},
+        _step(session, trace, "model_call", agent, config.AGENT_MODEL, {"iteration": iteration},
               ", ".join(c.function.name for c in calls) or "final answer", ms)
         if not calls:
             return message.content
         messages.append(message)
         for call in calls:
             args = _parse_json(call.function.arguments)
-            result, ms = _timed(_run_tool, call.function.name, args)
-            _step(session, trace, "tool_call", "account", call.function.name, args, json.dumps(result)[:300], ms)
-            if "error" in result:
-                return _tool_error(call.function.name, result, lang)
+            (result, final), ms = _timed(handle_call, call.function.name, args, session)
+            _step(session, trace, "tool_call", agent, call.function.name, args, json.dumps(result)[:300], ms)
+            if final:
+                return final
             messages.append({"role": "tool", "name": call.function.name, "tool_call_id": call.id,
                              "content": json.dumps(result)})
-    return _msg("incomplete", lang)
+    return _msg("incomplete", session["lang"])
+
+
+def _account_call(name, args, session):
+    """Run a read-only account tool; any error ends the turn with the fixed message naming the service."""
+    result = _run_tool(name, args)
+    return result, _tool_error(name, result, session["lang"]) if "error" in result else None
+
+
+def account_agent(session, trace):
+    """Account agent: tool loop over the read-only tools get_balance, get_transactions, get_branch_hours, list_cards."""
+    return _tool_loop(session, trace, "account", ACCOUNT_PROMPT, ACCOUNT_TOOLS, _account_call)
+
+
+def _propose_lock_card(card_id, session):
+    """Check in code that the card is the customer's and active, then store the pending lock; nothing is executed."""
+    lang, cards = session["lang"], bank_api.list_cards(config.CUSTOMER_ID)
+    if "error" in cards:
+        return cards, _tool_error("propose_lock_card", cards, lang)
+    card = next((c for c in cards["cards"] if c["id"] == card_id), None)
+    if card is None:
+        return {"error": "not_allowed"}, _msg("card_not_found", lang)
+    label = f"{card['type']} ****{card['last_4']}"
+    if card["status"] != "active":
+        return {"error": "already_locked"}, _msg("card_already_locked", lang, card=label)
+    session["pending_action"] = {"action": "lock_card", "card_id": card["id"], "card_label": label,
+                                 "idempotency_key": str(uuid.uuid4())}
+    return session["pending_action"], _msg("lock_proposed", lang, card=label)
+
+
+def _action_call(name, args, session):
+    """Action tools: list_cards reads, propose_lock_card only proposes, refuse_action and unknown tools refuse."""
+    if name == "list_cards":
+        result = _run_tool(name, args)
+        return result, _tool_error(name, result, session["lang"]) if "error" in result else None
+    if name == "propose_lock_card":
+        return _propose_lock_card(args.get("card_id"), session)
+    return {"refused": str(args.get("requested_action", name))}, _msg("action_refused", session["lang"])
+
+
+def action_agent(session, trace):
+    """Action agent: can only propose a card lock (confirmed later by the button) or refuse."""
+    return _tool_loop(session, trace, "action", ACTION_PROMPT, ACTION_TOOLS, _action_call)
 
 
 def handoff_agent(session, trace):
@@ -221,18 +278,18 @@ def _faq_turn(session, trace):
 
 
 def _run_agent(route_name, session, trace):
-    """Dispatch to the agent of the route; action, out_of_scope and router errors get fixed messages."""
+    """Dispatch to the agent of the route; out_of_scope and router errors get fixed messages."""
     if route_name != "faq":
         session["not_found_count"] = 0
-    agent = {"faq": _faq_turn, "account": account_agent, "handoff": handoff_agent}.get(route_name)
+    agents = {"faq": _faq_turn, "account": account_agent, "action": action_agent, "handoff": handoff_agent}
+    agent = agents.get(route_name)
     if agent:
         try:
             return agent(session, trace)
         except Exception as error:  # API failure inside an agent: logged, never shown raw
             _step(session, trace, "error", route_name, type(error).__name__, {}, "agent failed", 0)
             return _msg("incomplete", session["lang"])
-    fixed = {"action": "action_not_available", "out_of_scope": "out_of_scope"}
-    return _msg(fixed.get(route_name, "router_error"), session["lang"])
+    return _msg("out_of_scope" if route_name == "out_of_scope" else "router_error", session["lang"])
 
 
 def _moderated(text, direction, session, trace):
@@ -267,17 +324,64 @@ def _output_checked(answer, session, trace):
     return _msg("output_fallback", session["lang"]) if result["flagged"] else answer
 
 
+def _typed_confirmation(text, session, trace):
+    """A typed "yes" never executes the pending action: return the "use the Confirm button" message, else None."""
+    words = " ".join(text.lower().replace("\u2019", "'").strip(" .!?").split())
+    if session["pending_action"] is None or words not in config.CONFIRM_WORDS:
+        return None
+    _step(session, trace, "typed_confirmation", "guardrails", "pending_action", {"text": text}, "not executed", 0)
+    return _msg("use_confirm_button", session["lang"])
+
+
+def _routed_answer(session, trace):
+    """Route the latest message, run its agent and moderate the answer."""
+    decision, ms = _timed(route, session["history"])
+    _step(session, trace, "route", "router", config.ROUTER_MODEL, {"messages": len(session["history"])},
+          f"{decision['route']}: {decision['reason']}", ms)
+    return _output_checked(_run_agent(decision["route"], session, trace), session, trace)
+
+
 def handle_turn(user_message, session):
-    """One turn: input guardrails, router, agent, output moderation; returns (answer, trace, pending_action)."""
+    """One turn: input guardrails, typed-yes check, router, agent, output moderation.
+    Returns (answer, trace, pending_action); the session stays the source of truth."""
     trace, start = [], time.perf_counter()
     session["lang"] = detect_lang(user_message)
     answer = _input_refusal(user_message, session, trace)
     if answer is None:  # flagged messages never enter the history
         session["history"].append({"role": "user", "content": user_message})
-        decision, ms = _timed(route, session["history"])
-        _step(session, trace, "route", "router", config.ROUTER_MODEL, {"messages": len(session["history"])},
-              f"{decision['route']}: {decision['reason']}", ms)
-        answer = _output_checked(_run_agent(decision["route"], session, trace), session, trace)
+        answer = _typed_confirmation(user_message, session, trace) or _routed_answer(session, trace)
         session["history"].append({"role": "assistant", "content": answer})
     _step(session, trace, "answer", "assistant", "handle_turn", {}, answer[:200], (time.perf_counter() - start) * 1000)
     return answer, trace, session["pending_action"]
+
+
+def _closing_message(session, step, args, answer):
+    """Log a confirm or cancel step, add the message to the history and return it."""
+    _step(session, [], step, "action", step, args, answer, 0)
+    session["history"].append({"role": "assistant", "content": answer})
+    return answer
+
+
+def confirm_action(session):
+    """Execute the pending action with CUSTOMER_ID and its idempotency key, if allowlisted; returns the message.
+    An outage keeps the pending action so a retry reuses the same key; any other result clears it."""
+    lang, pending = session["lang"], session["pending_action"]
+    if pending is None:
+        return _closing_message(session, "confirm", {}, _msg("no_pending_action", lang))
+    if pending["action"] not in config.ALLOWED_ACTIONS:
+        session["pending_action"] = None
+        return _closing_message(session, "confirm", pending, _msg("action_refused", lang))
+    result, ms = _timed(bank_api.lock_card, config.CUSTOMER_ID, pending["card_id"], pending["idempotency_key"])
+    _step(session, [], "action", "action", "lock_card", pending, json.dumps(result), ms)
+    if result.get("error") != "service_unavailable":
+        session["pending_action"] = None
+    answer = _tool_error("lock_card", result, lang) if "error" in result else _msg("lock_done", lang,
+                                                                                  card=pending["card_label"])
+    return _closing_message(session, "confirm", pending, answer)
+
+
+def cancel_action(session):
+    """Clear the pending action without executing anything; returns the message."""
+    pending, session["pending_action"] = session["pending_action"], None
+    answer = _msg("action_cancelled" if pending else "no_pending_action", session["lang"])
+    return _closing_message(session, "cancel", pending or {}, answer)

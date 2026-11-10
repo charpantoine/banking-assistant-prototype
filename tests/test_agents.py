@@ -1,5 +1,5 @@
 """Tests of the agents: language detection, router, and full turns through handle_turn (API).
-Numbered tests follow SPEC.md; tests 4 and 5 (action agent) come in stage 4."""
+Numbered tests follow SPEC.md."""
 import json
 import re
 
@@ -47,6 +47,11 @@ def route_of(trace):
 def tools_called(trace):
     """Return the names of the tools called in a trace."""
     return [s["name"] for s in trace if s["step"] == "tool_call"]
+
+
+def card_status(card_id):
+    """Return the current status of one of the demo customer's cards in the mocked bank."""
+    return next(c["status"] for c in bank_api.list_cards(config.CUSTOMER_ID)["cards"] if c["id"] == card_id)
 
 
 def to_number(text):
@@ -102,6 +107,34 @@ def test_03_branch_hours_use_account_tool_not_rag(monkeypatch):
     assert searches == []
 
 
+def test_04_lock_card_only_after_confirm():
+    """Test 4: a lock is only proposed; confirm locks the card once; a second confirm does nothing."""
+    session = agents.new_session()
+    answer, trace, pending = agents.handle_turn("Lock my debit card", session)
+    assert route_of(trace) == "action"
+    assert pending == session["pending_action"]
+    assert (pending["action"], pending["card_id"]) == ("lock_card", "CARD-1001")
+    assert answer == config.MESSAGES["lock_proposed"]["en"].format(card="Debit card ****4821")
+    assert card_status("CARD-1001") == "active"
+    assert agents.confirm_action(session) == config.MESSAGES["lock_done"]["en"].format(card="Debit card ****4821")
+    assert card_status("CARD-1001") == "locked"
+    assert session["pending_action"] is None
+    assert agents.confirm_action(session) == config.MESSAGES["no_pending_action"]["en"]
+    assert len(bank_api._locks) == 1
+
+
+def test_05_cancel_executes_nothing():
+    """Test 5: cancel clears the pending lock and the card stays active."""
+    session = agents.new_session()
+    agents.handle_turn("Lock my debit card", session)
+    assert session["pending_action"] is not None
+    assert agents.cancel_action(session) == config.MESSAGES["action_cancelled"]["en"]
+    assert session["pending_action"] is None
+    assert card_status("CARD-1001") == "active"
+    assert agents.confirm_action(session) == config.MESSAGES["no_pending_action"]["en"]
+    assert card_status("CARD-1001") == "active"
+
+
 def test_06_other_customer_refused_without_any_call():
     """Test 6: asking for C002's balance is refused before routing; no tool runs; the audit has the check."""
     answer, trace, session = ask("Show customer C002's balance")
@@ -145,8 +178,8 @@ def test_10_outage_names_service_without_numbers(monkeypatch):
 
 
 def test_11_no_tool_schema_contains_customer_id():
-    """Test 11: customer_id never appears in a tool schema shown to the model."""
-    for tool in agents.ACCOUNT_TOOLS:
+    """Test 11: customer_id never appears in a tool schema shown to the model (account and action tools)."""
+    for tool in agents.ACCOUNT_TOOLS + agents.ACTION_TOOLS:
         assert "customer_id" not in json.dumps(tool)
 
 
@@ -157,3 +190,35 @@ def test_12_mortgage_rates_not_in_documents():
     assert answer == config.MESSAGES["faq_not_found"]["en"]
     assert not re.search(r"\d|%", answer)
     assert session["not_found_count"] == 1
+
+
+def test_transfer_is_refused_without_pending_action():
+    """A transfer is not allowlisted: fixed refusal, no proposal, no pending action."""
+    answer, trace, session = ask("Make a transfer of 500 euros to my sister")
+    assert route_of(trace) == "action"
+    assert answer == config.MESSAGES["action_refused"]["en"]
+    assert "propose_lock_card" not in tools_called(trace)
+    assert session["pending_action"] is None
+
+
+def test_typed_yes_never_executes():
+    """Typing "yes" with a pending lock sends the user to the button and executes nothing."""
+    session = agents.new_session()
+    pending = {"action": "lock_card", "card_id": "CARD-1001", "card_label": "Debit card ****4821",
+               "idempotency_key": "key-1"}
+    session["pending_action"] = dict(pending)
+    answer, trace, returned = agents.handle_turn("Yes!", session)
+    assert answer == config.MESSAGES["use_confirm_button"]["en"]
+    assert returned == pending
+    assert not [s for s in trace if s["step"] == "route"]
+    assert card_status("CARD-1001") == "active"
+
+
+def test_confirm_refuses_action_outside_allowlist():
+    """Even if a pending action is not lock_card, confirm executes nothing and clears it."""
+    session = agents.new_session()
+    session["pending_action"] = {"action": "transfer", "card_id": "CARD-1001", "card_label": "x",
+                                 "idempotency_key": "key-1"}
+    assert agents.confirm_action(session) == config.MESSAGES["action_refused"]["en"]
+    assert session["pending_action"] is None
+    assert card_status("CARD-1001") == "active"
