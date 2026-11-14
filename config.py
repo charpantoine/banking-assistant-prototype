@@ -59,13 +59,13 @@ HISTORY_LIMIT = 20
 MESSAGES = {
     # Display-only first chat message; never added to the history sent to the models.
     "welcome": {
-        "en": "Hello, I’m your banking assistant (prototype, mock data). I can:\n\n"
+        "en": "Hello, I’m your AI banking assistant (prototype, mock data). I can:\n\n"
               "- answer your questions about our services, with the source document\n"
               "- show your balances, recent transactions and your branch’s opening hours\n"
               "- temporarily lock one of your cards, after your confirmation\n"
               "- put you in touch with an advisor at any time\n\n"
               "I can’t make transfers or change your personal details here. How can I help?",
-        "fr": "Bonjour, je suis votre assistant bancaire (prototype, données fictives). Je peux :\n\n"
+        "fr": "Bonjour, je suis votre assistant bancaire IA (prototype, données fictives). Je peux :\n\n"
               "- répondre à vos questions sur nos services, avec le document source\n"
               "- afficher vos soldes, vos dernières opérations et les horaires de votre agence\n"
               "- bloquer temporairement l’une de vos cartes, après votre confirmation\n"
@@ -74,11 +74,11 @@ MESSAGES = {
               "Comment puis-je vous aider ?",
     },
     "welcome_visitor": {
-        "en": "Hello, I’m your banking assistant (prototype, mock data). You are not logged in. I can:\n\n"
+        "en": "Hello, I’m your AI banking assistant (prototype, mock data). You are not logged in. I can:\n\n"
               "- answer your general questions about our services, with the source document\n"
               "- put you in touch with an advisor at any time\n\n"
               "Log in to see your accounts and manage your cards. How can I help?",
-        "fr": "Bonjour, je suis votre assistant bancaire (prototype, données fictives). Vous n’êtes pas connecté. "
+        "fr": "Bonjour, je suis votre assistant bancaire IA (prototype, données fictives). Vous n’êtes pas connecté. "
               "Je peux :\n\n"
               "- répondre à vos questions générales sur nos services, avec le document source\n"
               "- vous mettre en relation avec un conseiller à tout moment\n\n"
